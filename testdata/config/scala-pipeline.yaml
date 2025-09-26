@@ -1,0 +1,55 @@
+name: "Scala API and Service Deployment Pipeline"
+language: "scala"
+version: "2.13"
+branch: "main"
+folder: "."
+expose_ports: false
+env:
+  AWS_ACCESS_KEY_ID: "your-aws-access-key-id"
+  AWS_SECRET_ACCESS_KEY: "your-aws-secret-access-key"
+  AWS_DEFAULT_REGION: "us-east-1"
+  EB_APP_NAME: "your-elastic-beanstalk-app-name"
+  EB_ENV_NAME: "your-elastic-beanstalk-env-name"
+  S3_BUCKET: "your-s3-bucket-name"
+  API_REPO_URL: "https://github.com/your-org/api.git"
+  SERVICE_REPO_URL: "https://github.com/your-org/service.git"
+  BRANCH: "main"
+steps:
+  - type: "bash"
+    content: |
+      apt-get update && apt-get install -y awscli git
+      echo "AWS CLI and Git installed"
+  - type: "bash"
+    content: |
+      git clone $API_REPO_URL api-repo
+      cd api-repo
+      if [ -n "$BRANCH" ]; then git checkout $BRANCH; fi
+      sbt publishLocal
+      echo "API artifacts published locally"
+  - type: "bash"
+    content: |
+      git clone $SERVICE_REPO_URL service-repo
+      cd service-repo
+      if [ -n "$BRANCH" ]; then git checkout $BRANCH; fi
+      cp -r ../api-repo/.ivy2 $HOME/.ivy2
+      sbt package
+      echo "Service built successfully"
+  - type: "bash"
+    content: |
+      cd service-repo
+      WAR_FILE=$(find target -name "*.war" | head -1)
+      if [ -z "$WAR_FILE" ]; then
+        echo "No WAR file found"
+        exit 1
+      fi
+      aws s3 cp $WAR_FILE s3://$S3_BUCKET/
+      WAR_KEY=$(basename $WAR_FILE)
+      aws elasticbeanstalk create-application-version \
+        --application-name $EB_APP_NAME \
+        --version-label "v$(date +%Y%m%d%H%M%S)" \
+        --source-bundle S3Bucket=$S3_BUCKET,S3Key=$WAR_KEY
+      aws elasticbeanstalk update-environment \
+        --application-name $EB_APP_NAME \
+        --environment-name $EB_ENV_NAME \
+        --version-label "v$(date +%Y%m%d%H%M%S)"
+      echo "Deployment to Elastic Beanstalk completed"

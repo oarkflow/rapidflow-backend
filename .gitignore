@@ -1,0 +1,5 @@
+docker-app
+*.db
+*.log
+.env
+.DS_Store

@@ -1,0 +1,42 @@
+name: "Golang Server App Pipeline"
+language: "golang"
+version: "1.21"
+branch: "main"
+folder: "./my-go-app"
+expose_ports: true
+env:
+  GOOS: "linux"
+  GOARCH: "amd64"
+  PORT: "3000"
+  DATABASE_URL: "sqlite://db.sqlite"
+steps:
+  - type: "bash"
+    content: |
+      apt-get update && apt-get install -y wget curl git build-essential
+      echo "Tools installed"
+    files:
+      config.json: |
+        {
+          "port": 3000,
+          "database": "sqlite://db.sqlite"
+        }
+  - type: "bash"
+    content: |
+      cd /workspace
+      ls -la
+  - type: "bash"
+    content: |
+      cd /workspace
+      go mod download
+      go build -o server .
+      echo "Build completed"
+  - type: "bash"
+    content: |
+      cd /workspace
+      ./server > /tmp/server.log 2>&1 &
+      SERVER_PID=$!
+      sleep 3
+      curl http://localhost:3000/health && echo "Health check passed" || echo "Health check failed"
+      kill $SERVER_PID
+      echo "Server logs:"
+      cat /tmp/server.log
