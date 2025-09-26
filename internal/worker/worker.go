@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
@@ -19,8 +20,10 @@ import (
 )
 
 type Worker struct {
-	DB     *sqlx.DB
-	Docker *client.Client
+	DB          *sqlx.DB
+	Docker      *client.Client
+	runningJobs map[int]context.CancelFunc
+	mutex       sync.RWMutex
 }
 
 func NewWorker(db *sqlx.DB) (*Worker, error) {
@@ -28,7 +31,39 @@ func NewWorker(db *sqlx.DB) (*Worker, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Worker{DB: db, Docker: cli}, nil
+	return &Worker{
+		DB:          db,
+		Docker:      cli,
+		runningJobs: make(map[int]context.CancelFunc),
+	}, nil
+}
+
+// addRunningJob adds a job to the running jobs map with its cancel function
+func (w *Worker) addRunningJob(jobID int, cancel context.CancelFunc) {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	w.runningJobs[jobID] = cancel
+}
+
+// removeRunningJob removes a job from the running jobs map
+func (w *Worker) removeRunningJob(jobID int) {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	delete(w.runningJobs, jobID)
+}
+
+// CancelJob cancels a running job by its ID
+func (w *Worker) CancelJob(jobID int) error {
+	w.mutex.RLock()
+	cancel, exists := w.runningJobs[jobID]
+	w.mutex.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("job %d is not currently running", jobID)
+	}
+
+	cancel()
+	return nil
 }
 
 func getBaseImage(language, version string) string {
@@ -59,13 +94,32 @@ func getBaseImage(language, version string) string {
 }
 
 func (w *Worker) RunJob(jobID int) error {
+	return w.RunJobWithContext(context.Background(), jobID)
+}
+
+func (w *Worker) RunJobWithContext(ctx context.Context, jobID int) error {
+	// Create a cancellable context for this job
+	jobCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Register this job as running
+	w.addRunningJob(jobID, cancel)
+	defer w.removeRunningJob(jobID)
+
 	log.Printf("Starting job %d", jobID)
-	// Get job
+
+	// Check if job was cancelled before we start
 	var job models.Job
 	err := w.DB.Get(&job, "SELECT * FROM jobs WHERE id = ?", jobID)
 	if err != nil {
 		return err
 	}
+
+	if job.Cancelled {
+		log.Printf("Job %d was cancelled before starting", jobID)
+		return nil
+	}
+
 	// Update status to running
 	_, err = w.DB.Exec("UPDATE jobs SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ?", jobID)
 	if err != nil {
@@ -85,6 +139,15 @@ func (w *Worker) RunJob(jobID int) error {
 	if job.Branch != nil {
 		envVars = append(envVars, fmt.Sprintf("BRANCH=%s", *job.Branch))
 	}
+
+	// Check for cancellation
+	select {
+	case <-jobCtx.Done():
+		w.DB.Exec("UPDATE jobs SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP WHERE id = ?", jobID)
+		return fmt.Errorf("job %d was cancelled", jobID)
+	default:
+	}
+
 	// Setup ports
 	exposedPorts := nat.PortSet{}
 	portBindings := nat.PortMap{}
@@ -103,16 +166,15 @@ func (w *Worker) RunJob(jobID int) error {
 		versionStr = *job.Version
 	}
 	baseImage := getBaseImage(*job.Language, versionStr)
-	ctx := context.Background()
 	fallback := false
 	// Pull image
 	log.Printf("Pulling image %s", baseImage)
-	out, err := w.Docker.ImagePull(ctx, baseImage, types.ImagePullOptions{})
+	out, err := w.Docker.ImagePull(jobCtx, baseImage, types.ImagePullOptions{})
 	if err != nil {
 		log.Printf("Failed to pull image %s: %v, falling back to ubuntu", baseImage, err)
 		fallback = true
 		baseImage = "ubuntu:latest"
-		out, err = w.Docker.ImagePull(ctx, baseImage, types.ImagePullOptions{})
+		out, err = w.Docker.ImagePull(jobCtx, baseImage, types.ImagePullOptions{})
 		if err != nil {
 			return err
 		}
@@ -129,6 +191,15 @@ func (w *Worker) RunJob(jobID int) error {
 		}
 	}
 	log.Printf("Image pulled successfully")
+
+	// Check for cancellation again
+	select {
+	case <-jobCtx.Done():
+		w.DB.Exec("UPDATE jobs SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP WHERE id = ?", jobID)
+		return fmt.Errorf("job %d was cancelled", jobID)
+	default:
+	}
+
 	hostConfig := &container.HostConfig{
 		PortBindings: portBindings,
 	}
@@ -139,7 +210,7 @@ func (w *Worker) RunJob(jobID int) error {
 		}
 		hostConfig.Binds = []string{fmt.Sprintf("%s:/workspace", absPath)}
 	}
-	resp, err := w.Docker.ContainerCreate(ctx, &container.Config{
+	resp, err := w.Docker.ContainerCreate(jobCtx, &container.Config{
 		Image:        baseImage,
 		Env:          envVars,
 		Cmd:          []string{"sleep", "infinity"},
@@ -150,9 +221,17 @@ func (w *Worker) RunJob(jobID int) error {
 		return err
 	}
 	containerID := resp.ID
-	defer w.Docker.ContainerRemove(ctx, containerID, types.ContainerRemoveOptions{Force: true})
+
+	// Store container ID in database for potential cleanup
+	_, err = w.DB.Exec("UPDATE jobs SET container_id = ? WHERE id = ?", containerID, jobID)
+	if err != nil {
+		log.Printf("Warning: failed to store container ID: %v", err)
+	}
+
+	defer w.Docker.ContainerRemove(context.Background(), containerID, types.ContainerRemoveOptions{Force: true})
+
 	// Start container
-	err = w.Docker.ContainerStart(ctx, containerID, types.ContainerStartOptions{})
+	err = w.Docker.ContainerStart(jobCtx, containerID, types.ContainerStartOptions{})
 	if err != nil {
 		return err
 	}
@@ -167,7 +246,7 @@ func (w *Worker) RunJob(jobID int) error {
 				return err
 			}
 			// Create script in container
-			execResp, err := w.Docker.ContainerExecCreate(ctx, containerID, types.ExecConfig{
+			execResp, err := w.Docker.ContainerExecCreate(jobCtx, containerID, types.ExecConfig{
 				Cmd:          []string{"sh", "-c", fmt.Sprintf("echo '%s' > /tmp/install.sh && chmod +x /tmp/install.sh", string(scriptContent))},
 				AttachStdout: true,
 				AttachStderr: true,
@@ -175,11 +254,11 @@ func (w *Worker) RunJob(jobID int) error {
 			if err != nil {
 				return err
 			}
-			err = w.Docker.ContainerExecStart(ctx, execResp.ID, types.ExecStartCheck{})
+			err = w.Docker.ContainerExecStart(jobCtx, execResp.ID, types.ExecStartCheck{})
 			if err != nil {
 				return err
 			}
-			inspect, err := w.Docker.ContainerExecInspect(ctx, execResp.ID)
+			inspect, err := w.Docker.ContainerExecInspect(jobCtx, execResp.ID)
 			if err != nil {
 				return err
 			}
@@ -187,7 +266,7 @@ func (w *Worker) RunJob(jobID int) error {
 				return fmt.Errorf("failed to create install script")
 			}
 			// Run script
-			execResp, err = w.Docker.ContainerExecCreate(ctx, containerID, types.ExecConfig{
+			execResp, err = w.Docker.ContainerExecCreate(jobCtx, containerID, types.ExecConfig{
 				Cmd:          []string{"/tmp/install.sh"},
 				AttachStdout: true,
 				AttachStderr: true,
@@ -195,7 +274,7 @@ func (w *Worker) RunJob(jobID int) error {
 			if err != nil {
 				return err
 			}
-			hijacked, err := w.Docker.ContainerExecAttach(ctx, execResp.ID, types.ExecStartCheck{})
+			hijacked, err := w.Docker.ContainerExecAttach(jobCtx, execResp.ID, types.ExecStartCheck{})
 			if err != nil {
 				return err
 			}
@@ -206,11 +285,19 @@ func (w *Worker) RunJob(jobID int) error {
 				line := scanner.Text()
 				log.Println(line)
 				output.WriteString(line + "\n")
+
+				// Check for cancellation while reading output
+				select {
+				case <-jobCtx.Done():
+					w.DB.Exec("UPDATE jobs SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP WHERE id = ?", jobID)
+					return fmt.Errorf("job %d was cancelled", jobID)
+				default:
+				}
 			}
 			if err := scanner.Err(); err != nil {
 				return err
 			}
-			inspect, err = w.Docker.ContainerExecInspect(ctx, execResp.ID)
+			inspect, err = w.Docker.ContainerExecInspect(jobCtx, execResp.ID)
 			if err != nil {
 				return err
 			}
@@ -224,7 +311,7 @@ func (w *Worker) RunJob(jobID int) error {
 	if job.RepoName != nil {
 		// Clone repo
 		log.Printf("Cloning repo %s", *job.RepoName)
-		execResp, err := w.Docker.ContainerExecCreate(ctx, containerID, types.ExecConfig{
+		execResp, err := w.Docker.ContainerExecCreate(jobCtx, containerID, types.ExecConfig{
 			Cmd:          []string{"sh", "-c", fmt.Sprintf("git clone %s /workspace", *job.RepoName)},
 			AttachStdout: true,
 			AttachStderr: true,
@@ -232,11 +319,11 @@ func (w *Worker) RunJob(jobID int) error {
 		if err != nil {
 			return err
 		}
-		err = w.Docker.ContainerExecStart(ctx, execResp.ID, types.ExecStartCheck{})
+		err = w.Docker.ContainerExecStart(jobCtx, execResp.ID, types.ExecStartCheck{})
 		if err != nil {
 			return err
 		}
-		inspect, err := w.Docker.ContainerExecInspect(ctx, execResp.ID)
+		inspect, err := w.Docker.ContainerExecInspect(jobCtx, execResp.ID)
 		if err != nil {
 			return err
 		}
@@ -247,7 +334,7 @@ func (w *Worker) RunJob(jobID int) error {
 		// Checkout branch if specified
 		if job.Branch != nil && *job.Branch != "" {
 			log.Printf("Checking out branch %s", *job.Branch)
-			execResp, err := w.Docker.ContainerExecCreate(ctx, containerID, types.ExecConfig{
+			execResp, err := w.Docker.ContainerExecCreate(jobCtx, containerID, types.ExecConfig{
 				Cmd:          []string{"sh", "-c", fmt.Sprintf("cd /workspace && git checkout %s", *job.Branch)},
 				AttachStdout: true,
 				AttachStderr: true,
@@ -255,11 +342,11 @@ func (w *Worker) RunJob(jobID int) error {
 			if err != nil {
 				return err
 			}
-			err = w.Docker.ContainerExecStart(ctx, execResp.ID, types.ExecStartCheck{})
+			err = w.Docker.ContainerExecStart(jobCtx, execResp.ID, types.ExecStartCheck{})
 			if err != nil {
 				return err
 			}
-			inspect, err := w.Docker.ContainerExecInspect(ctx, execResp.ID)
+			inspect, err := w.Docker.ContainerExecInspect(jobCtx, execResp.ID)
 			if err != nil {
 				return err
 			}
@@ -271,6 +358,7 @@ func (w *Worker) RunJob(jobID int) error {
 	} else {
 		log.Printf("Using local folder")
 	}
+
 	// Now run steps
 	// Get steps
 	var steps []models.Step
@@ -280,6 +368,15 @@ func (w *Worker) RunJob(jobID int) error {
 	}
 	log.Printf("Running %d steps", len(steps))
 	for _, step := range steps {
+		// Check for cancellation before each step
+		select {
+		case <-jobCtx.Done():
+			w.DB.Exec("UPDATE jobs SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP WHERE id = ?", jobID)
+			w.DB.Exec("UPDATE steps SET status = 'cancelled' WHERE job_id = ? AND status IN ('pending', 'running')", jobID)
+			return fmt.Errorf("job %d was cancelled", jobID)
+		default:
+		}
+
 		log.Printf("Running step %d", step.ID)
 		// Update step status
 		_, err = w.DB.Exec("UPDATE steps SET status = 'running' WHERE id = ?", step.ID)
@@ -296,7 +393,7 @@ func (w *Worker) RunJob(jobID int) error {
 		for _, f := range files {
 			content := f.Content
 			// Exec to create file
-			execResp, err := w.Docker.ContainerExecCreate(ctx, containerID, types.ExecConfig{
+			execResp, err := w.Docker.ContainerExecCreate(jobCtx, containerID, types.ExecConfig{
 				Cmd:          []string{"sh", "-c", fmt.Sprintf("echo '%s' > %s", content, f.Name)},
 				AttachStdout: true,
 				AttachStderr: true,
@@ -304,12 +401,12 @@ func (w *Worker) RunJob(jobID int) error {
 			if err != nil {
 				return err
 			}
-			err = w.Docker.ContainerExecStart(ctx, execResp.ID, types.ExecStartCheck{})
+			err = w.Docker.ContainerExecStart(jobCtx, execResp.ID, types.ExecStartCheck{})
 			if err != nil {
 				return err
 			}
 			// Wait for exec
-			inspect, err := w.Docker.ContainerExecInspect(ctx, execResp.ID)
+			inspect, err := w.Docker.ContainerExecInspect(jobCtx, execResp.ID)
 			if err != nil {
 				return err
 			}
@@ -321,7 +418,7 @@ func (w *Worker) RunJob(jobID int) error {
 		}
 		// Run the step content as bash
 		if step.Type == "bash" {
-			execResp, err := w.Docker.ContainerExecCreate(ctx, containerID, types.ExecConfig{
+			execResp, err := w.Docker.ContainerExecCreate(jobCtx, containerID, types.ExecConfig{
 				Cmd:          []string{"sh", "-c", step.Content},
 				AttachStdout: true,
 				AttachStderr: true,
@@ -329,7 +426,7 @@ func (w *Worker) RunJob(jobID int) error {
 			if err != nil {
 				return err
 			}
-			hijacked, err := w.Docker.ContainerExecAttach(ctx, execResp.ID, types.ExecStartCheck{})
+			hijacked, err := w.Docker.ContainerExecAttach(jobCtx, execResp.ID, types.ExecStartCheck{})
 			if err != nil {
 				return err
 			}
@@ -340,12 +437,21 @@ func (w *Worker) RunJob(jobID int) error {
 				line := scanner.Text()
 				log.Println(line)
 				output.WriteString(line + "\n")
+
+				// Check for cancellation while reading step output
+				select {
+				case <-jobCtx.Done():
+					w.DB.Exec("UPDATE jobs SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP WHERE id = ?", jobID)
+					w.DB.Exec("UPDATE steps SET status = 'cancelled' WHERE job_id = ? AND status IN ('pending', 'running')", jobID)
+					return fmt.Errorf("job %d was cancelled", jobID)
+				default:
+				}
 			}
 			if err := scanner.Err(); err != nil {
 				return err
 			}
 			// Wait for exec
-			inspect, err := w.Docker.ContainerExecInspect(ctx, execResp.ID)
+			inspect, err := w.Docker.ContainerExecInspect(jobCtx, execResp.ID)
 			if err != nil {
 				return err
 			}
@@ -357,9 +463,15 @@ func (w *Worker) RunJob(jobID int) error {
 			if err != nil {
 				log.Printf("Error updating step: %v", err)
 			}
+
+			// If step failed, mark job as failed and stop
+			if status == "failed" {
+				w.DB.Exec("UPDATE jobs SET status = 'failed', finished_at = CURRENT_TIMESTAMP WHERE id = ?", jobID)
+				return fmt.Errorf("step %d failed", step.ID)
+			}
 		}
 	}
-	// Update job status
+	// Update job status to success
 	_, err = w.DB.Exec("UPDATE jobs SET status = 'success', finished_at = CURRENT_TIMESTAMP WHERE id = ?", jobID)
 	if err != nil {
 		return err
@@ -370,8 +482,17 @@ func (w *Worker) RunJob(jobID int) error {
 func (w *Worker) StartQueue() {
 	go func() {
 		for {
+			// Check for cancelled jobs and clean them up
+			var cancelledJobs []models.Job
+			err := w.DB.Select(&cancelledJobs, "SELECT * FROM jobs WHERE status = 'running' AND cancelled = 1")
+			if err == nil {
+				for _, job := range cancelledJobs {
+					w.CancelJob(job.ID)
+				}
+			}
+
 			var jobs []models.Job
-			err := w.DB.Select(&jobs, "SELECT id FROM jobs WHERE status = 'pending' LIMIT 1")
+			err = w.DB.Select(&jobs, "SELECT id FROM jobs WHERE status = 'pending' LIMIT 1")
 			if err != nil {
 				log.Printf("Error selecting jobs: %v", err)
 				continue
@@ -384,7 +505,7 @@ func (w *Worker) StartQueue() {
 				err := w.RunJob(id)
 				if err != nil {
 					log.Printf("Error running job %d: %v", id, err)
-					w.DB.Exec("UPDATE jobs SET status = 'failed' WHERE id = ?", id)
+					w.DB.Exec("UPDATE jobs SET status = 'failed', finished_at = CURRENT_TIMESTAMP WHERE id = ?", id)
 				}
 			}(jobID)
 		}

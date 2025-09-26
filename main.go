@@ -52,6 +52,13 @@ func main() {
 }
 
 func startServer() error {
+	dir := "./testdata/data"
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		err = os.MkdirAll(dir, 0755)
+		if err != nil {
+			return err
+		}
+	}
 	// Connect DB
 	db, err := sqlx.Connect("sqlite3", "./testdata/data/ci.db")
 	if err != nil {
@@ -73,15 +80,21 @@ func startServer() error {
 	w.StartQueue()
 
 	// Setup API
-	handler := api.NewHandler(db)
+	handler := api.NewHandler(db, w)
 	app := fiber.New()
 	app.Post("/pipelines", handler.CreatePipeline)
 	app.Get("/pipelines", handler.GetPipelines)
 	app.Get("/jobs", handler.GetJobs)
 	app.Post("/pipelines/:pipelineID/jobs", handler.CreateJob)
 	app.Get("/jobs/:id", handler.GetJob)
+	app.Get("/jobs/:id/details", handler.GetJobDetails)
+	app.Get("/jobs/:id/logs", handler.GetJobLogs)
+	app.Get("/jobs/:id/logs/stream", handler.StreamJobLogs)
+	app.Post("/jobs/:id/cancel", handler.CancelJob)
+	app.Post("/jobs/:id/retry", handler.RetryJob)
 	app.Get("/jobs/:id/steps", handler.GetJobSteps)
 	app.Get("/steps/:id", handler.GetStep)
+	app.Get("/steps/:id/logs", handler.GetStepLogs)
 	app.Get("/health", func(c *fiber.Ctx) error { return c.SendString("OK") })
 
 	log.Println("Server starting on :3000")
@@ -107,6 +120,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     version TEXT,
     folder TEXT,
     expose_ports BOOLEAN DEFAULT 0,
+    cancelled BOOLEAN DEFAULT 0,
+    container_id TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     started_at DATETIME,
     finished_at DATETIME,
@@ -207,8 +222,8 @@ func runPipeline(filePath string) error {
 	if config.ExposePorts {
 		job.ExposePorts = &config.ExposePorts
 	}
-	query = `INSERT INTO jobs (pipeline_id, status, branch, repo_name, language, version, folder) VALUES (?, ?, ?, ?, ?, ?, ?)`
-	result, err = db.Exec(query, job.PipelineID, job.Status, job.Branch, job.RepoName, job.Language, job.Version, job.Folder)
+	query = `INSERT INTO jobs (pipeline_id, status, branch, repo_name, language, version, folder, expose_ports) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	result, err = db.Exec(query, job.PipelineID, job.Status, job.Branch, job.RepoName, job.Language, job.Version, job.Folder, job.ExposePorts)
 	if err != nil {
 		return err
 	}

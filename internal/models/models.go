@@ -21,6 +21,8 @@ type Job struct {
 	Version     *string    `db:"version"`
 	Folder      *string    `db:"folder"`
 	ExposePorts *bool      `db:"expose_ports"`
+	Cancelled   bool       `db:"cancelled"`
+	ContainerID *string    `db:"container_id"`
 	CreatedAt   time.Time  `db:"created_at"`
 	StartedAt   *time.Time `db:"started_at"`
 	FinishedAt  *time.Time `db:"finished_at"`
@@ -67,4 +69,18 @@ type StepConfig struct {
 	Type    string            `yaml:"type"`    // bash, file, etc.
 	Content string            `yaml:"content"` // script or content
 	Files   map[string]string `yaml:"files"`   // name: content
+}
+
+// JobWithDetails represents a job with all its related data
+type JobWithDetails struct {
+	Job          Job           `json:"job"`
+	Pipeline     Pipeline      `json:"pipeline"`
+	Steps        []Step        `json:"steps"`
+	Environments []Environment `json:"environments"`
+}
+
+// StepWithFiles represents a step with its associated files
+type StepWithFiles struct {
+	Step  Step   `json:"step"`
+	Files []File `json:"files"`
 }

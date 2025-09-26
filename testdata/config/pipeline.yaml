@@ -1,8 +1,8 @@
 name: "Golang Server App Pipeline"
 language: "golang"
-version: "1.21"
+version: "1.25"
 branch: "main"
-folder: "./my-go-app"
+folder: "./testdata/my-go-app"
 expose_ports: true
 env:
   GOOS: "linux"
