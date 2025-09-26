@@ -1,0 +1,62 @@
+name: "Advanced Golang Server App Pipeline"
+language: "golang"
+version: "1.25"
+branch: "main"
+folder: "./testdata/my-go-app"
+expose_ports: true
+env:
+  GOOS: "linux"
+  GOARCH: "amd64"
+  PORT: "3000"
+  DATABASE_URL: "sqlite://db.sqlite"
+steps:
+  - type: "bash"
+    content: |
+      apt-get update && apt-get install -y wget curl git build-essential
+      echo "Tools installed"
+    files:
+      config.json: |
+        {
+          "port": 3000,
+          "database": "sqlite://db.sqlite"
+        }
+  - type: "bash"
+    content: |
+      cd /workspace
+      ls -la
+  - type: "bash"
+    content: |
+      cd /workspace
+      go mod download
+      go build -o server .
+      echo "Build completed"
+  - type: "bash"
+    content: |
+      cd /workspace
+      ./server > /tmp/server.log 2>&1 &
+      SERVER_PID=$!
+      sleep 3
+      curl http://localhost:3000/health && echo "Health check passed" || echo "Health check failed"
+      kill $SERVER_PID
+      echo "Server logs:"
+      cat /tmp/server.log
+
+# Runnable definitions - how to package and deploy the built application
+runnables:
+  # Docker Image Export - Save image as tar for distribution
+  - name: "docker-image"
+    type: "docker_image"
+    enabled: true
+    config:
+      tag: "my-go-app:latest"
+    outputs:
+      - type: "s3"
+        config:
+          bucket: "my-deployment-bucket"
+          key: "docker-images/my-go-app-latest.tar"
+          region: "us-west-2"
+          access_key_id: "${AWS_ACCESS_KEY}"
+          secret_access_key: "${AWS_SECRET_KEY}"
+      - type: "local"
+        config:
+          path: "/tmp/my-go-app-image.tar"

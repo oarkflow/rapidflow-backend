@@ -5,6 +5,7 @@ import (
 	"docker-app/internal/api"
 	"docker-app/internal/models"
 	"docker-app/internal/worker"
+	"encoding/json"
 	"log"
 	"os"
 
@@ -155,6 +156,31 @@ CREATE TABLE IF NOT EXISTS files (
     content TEXT NOT NULL,
     FOREIGN KEY (step_id) REFERENCES steps(id)
 );
+
+CREATE TABLE IF NOT EXISTS runnables (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    type TEXT NOT NULL,
+    config TEXT NOT NULL,
+    status TEXT DEFAULT 'pending',
+    output TEXT,
+    artifact_url TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (job_id) REFERENCES jobs(id)
+);
+
+CREATE TABLE IF NOT EXISTS deployments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    runnable_id INTEGER NOT NULL,
+    output_type TEXT NOT NULL,
+    config TEXT NOT NULL,
+    status TEXT DEFAULT 'pending',
+    url TEXT,
+    output TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (runnable_id) REFERENCES runnables(id)
+);
 	`
 	_, err := db.Exec(schema)
 	return err
@@ -250,6 +276,40 @@ func runPipeline(filePath string) error {
 		_, err = db.Exec(`INSERT INTO environments (job_id, key, value) VALUES (?, ?, ?)`, jobID, k, v)
 		if err != nil {
 			return err
+		}
+	}
+
+	// Create runnables
+	for _, runnable := range config.Runnables {
+		if !runnable.Enabled {
+			continue // Skip disabled runnables
+		}
+
+		configJSON, err := json.Marshal(runnable)
+		if err != nil {
+			return err
+		}
+
+		result, err := db.Exec(`INSERT INTO runnables (job_id, name, type, config, status) VALUES (?, ?, ?, ?, ?)`,
+			jobID, runnable.Name, runnable.Type, string(configJSON), "pending")
+		if err != nil {
+			return err
+		}
+
+		runnableID, _ := result.LastInsertId()
+
+		// Create deployments for this runnable
+		for _, output := range runnable.Outputs {
+			outputConfigJSON, err := json.Marshal(output.Config)
+			if err != nil {
+				return err
+			}
+
+			_, err = db.Exec(`INSERT INTO deployments (runnable_id, output_type, config, status) VALUES (?, ?, ?, ?)`,
+				runnableID, output.Type, string(outputConfigJSON), "pending")
+			if err != nil {
+				return err
+			}
 		}
 	}
 

@@ -1,0 +1,53 @@
+name: "Port Format Testing Pipeline"
+language: "golang"
+version: "1.25"
+branch: "main"
+folder: "./testdata/my-go-app"
+expose_ports: true
+env:
+  GOOS: "linux"
+  GOARCH: "amd64"
+  PORT: "3000"
+steps:
+  - type: "bash"
+    content: |
+      cd /workspace
+      go build -o server .
+
+# Test different port mapping formats
+runnables:
+  # Test 1: Single port "3000" (same port on host and container)
+  - name: "test-single-port"
+    type: "docker_container"
+    enabled: false
+    container_name: "test-single-port"
+    entrypoint: ["/app/server"]
+    ports: ["3000"]
+
+  # Test 2: Host:Container mapping "9000:3000"
+  - name: "test-port-mapping"
+    type: "docker_container"
+    enabled: false
+    container_name: "test-port-mapping"
+    entrypoint: ["/app/server"]
+    ports: ["9000:3000"]
+
+  # Test 3: IP:Host:Container mapping "127.0.0.1:9001:3000"
+  - name: "test-ip-port-mapping"
+    type: "docker_container"
+    enabled: false
+    container_name: "test-ip-port-mapping"
+    entrypoint: ["/app/server"]
+    ports: ["127.0.0.1:9001:3000"]
+
+  # Test 4: No ports specified with expose_ports=true (should use default)
+  - name: "test-default-ports"
+    type: "docker_container"
+    enabled: true
+    container_name: "test-default-ports"
+    entrypoint: ["/app/server"]
+    # No ports specified - should use PORT env var (3000)
+    outputs:
+      - type: "local"
+        config:
+          path: "./testdata/data/default-ports-test.json"

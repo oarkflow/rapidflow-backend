@@ -1,4 +1,12 @@
-# RapidFlow Backend API
+# RapidFlow Backend API - Complete CI/CD Platform
+
+## Overview
+
+RapidFlow is a complete CI/CD platform that supports:
+- **Build Steps**: Execute build scripts and commands
+- **Runnables**: Package applications as Docker containers, images, or artifacts
+- **Deployments**: Deploy to multiple providers (S3, email, webhooks, local storage)
+- **Real-time Monitoring**: Stream build logs and monitor progress
 
 ## New Build Management Endpoints
 
@@ -133,11 +141,228 @@ Returns logs for a specific build step.
       "key": "CGO_ENABLED",
       "value": "0"
     }
+  ],
+  "runnables": [
+    {
+      "id": 1,
+      "job_id": 1,
+      "name": "docker-image",
+      "type": "docker_image",
+      "config": "{\"tag\":\"my-app:latest\"}",
+      "status": "success",
+      "output": "Docker image created successfully",
+      "artifact_url": "/tmp/my-app-image.tar",
+      "created_at": "2025-09-26T10:02:35Z"
+    }
+  ],
+  "deployments": [
+    {
+      "id": 1,
+      "runnable_id": 1,
+      "output_type": "s3",
+      "config": "{\"bucket\":\"my-bucket\",\"key\":\"images/my-app.tar\"}",
+      "status": "success",
+      "url": "s3://my-bucket/images/my-app.tar",
+      "output": "Successfully uploaded to S3",
+      "created_at": "2025-09-26T10:02:40Z"
+    }
   ]
 }
 ```
 
+## Runnables System
+
+### What are Runnables?
+
+Runnables define how to package and deploy your built application. After the build steps complete successfully, RapidFlow processes runnables to create deployable artifacts.
+
+### Runnable Types
+
+#### 1. **Docker Container** (`docker_container`)
+Creates and runs a Docker container from the built application.
+
+```yaml
+- name: "production-container"
+  type: "docker_container"
+  enabled: true
+  entrypoint: ["/workspace/server"]
+  ports: [3000, 8080]
+  environment:
+    ENV: "production"
+    DATABASE_URL: "postgres://..."
+  config:
+    restart_policy: "always"
+```
+
+#### 2. **Docker Image** (`docker_image`)
+Exports the built application as a Docker image (tar file).
+
+```yaml
+- name: "docker-image"
+  type: "docker_image"
+  enabled: true
+  config:
+    tag: "my-app:latest"
+    compress: true
+```
+
+#### 3. **Artifacts** (`artifacts`)
+Creates a zip archive of the workspace with built binaries and source files.
+
+```yaml
+- name: "release-artifacts"
+  type: "artifacts"
+  enabled: true
+  config:
+    include: ["server", "*.json", "README.md"]
+    exclude: ["*.log", ".git", "node_modules"]
+```
+
+#### 4. **Serverless** (`serverless`)
+Packages the application for serverless deployment (AWS Lambda, etc.).
+
+```yaml
+- name: "lambda-package"
+  type: "serverless"
+  enabled: true
+  config:
+    runtime: "go1.x"
+    handler: "main"
+    timeout: 30
+```
+
+### Deployment Outputs
+
+Each runnable can have multiple outputs defining where to deploy or send the artifacts.
+
+#### **S3 Output**
+```yaml
+outputs:
+  - type: "s3"
+    config:
+      bucket: "my-deployment-bucket"
+      key: "releases/my-app-v1.0.0.tar"
+      region: "us-west-2"
+      access_key_id: "${AWS_ACCESS_KEY}"
+      secret_access_key: "${AWS_SECRET_KEY}"
+```
+
+#### **Email Output**
+```yaml
+outputs:
+  - type: "email"
+    config:
+      to: ["team@company.com", "ops@company.com"]
+      subject: "New Release Available"
+      body: "The latest build artifacts are attached."
+```
+
+#### **Webhook Output**
+```yaml
+outputs:
+  - type: "webhook"
+    config:
+      url: "https://api.company.com/deployments"
+      method: "POST"
+      headers:
+        Authorization: "Bearer ${API_TOKEN}"
+        Content-Type: "application/octet-stream"
+```
+
+#### **Local Output**
+```yaml
+outputs:
+  - type: "local"
+    config:
+      path: "/tmp/deployments/my-app.tar"
+```
+
+### Complete Pipeline Example
+
+```yaml
+name: "Full Stack App Pipeline"
+language: "golang"
+version: "1.21"
+steps:
+  - type: "bash"
+    content: |
+      go mod download
+      go build -o app .
+      go test ./...
+
+runnables:
+  # Production Docker container
+  - name: "production"
+    type: "docker_container"
+    enabled: true
+    ports: [8080]
+    environment:
+      ENV: "production"
+    outputs:
+      - type: "webhook"
+        config:
+          url: "https://deploy.company.com/start"
+          method: "POST"
+
+  # Release artifacts
+  - name: "release"
+    type: "artifacts"
+    enabled: true
+    outputs:
+      - type: "s3"
+        config:
+          bucket: "releases"
+          key: "v1.0.0/app.zip"
+      - type: "email"
+        config:
+          to: ["releases@company.com"]
+          subject: "v1.0.0 Release Ready"
+```
+
 ### Cancel Running Job
+**POST** `/jobs/:id/cancel`
+
+Cancels a running or pending job. If the job is currently executing, it will be stopped gracefully.
+
+**Response:**
+```json
+{
+  "message": "job cancelled successfully"
+}
+```
+
+**Error Responses:**
+- `400` - Job cannot be cancelled (already completed/failed)
+- `404` - Job not found
+
+### Retry/Re-run Job
+**POST** `/jobs/:id/retry`
+
+Creates a new job based on an existing job's configuration. Useful for retrying failed builds or re-running successful builds.
+
+**Response:**
+```json
+{
+  "id": 5,
+  "pipeline_id": 1,
+  "status": "pending",
+  "branch": "main",
+  "repo_name": "https://github.com/user/repo",
+  "language": "golang",
+  "version": "1.21",
+  "folder": "./my-go-app",
+  "expose_ports": false,
+  "cancelled": false,
+  "container_id": null,
+  "created_at": "2025-09-26T11:00:00Z",
+  "started_at": null,
+  "finished_at": null
+}
+```
+
+**Error Responses:**
+- `400` - Cannot retry running or pending job
+- `404` - Original job not found
 **POST** `/jobs/:id/cancel`
 
 Cancels a running or pending job. If the job is currently executing, it will be stopped gracefully.

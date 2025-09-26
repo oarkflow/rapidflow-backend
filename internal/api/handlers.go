@@ -3,9 +3,11 @@ package api
 import (
 	"docker-app/internal/models"
 	"docker-app/internal/worker"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -128,6 +130,41 @@ func (h *Handler) CreateJob(c *fiber.Ctx) error {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
 	}
+
+	// Create runnables
+	for _, runnable := range config.Runnables {
+		if !runnable.Enabled {
+			continue // Skip disabled runnables
+		}
+
+		configJSON, err := json.Marshal(runnable)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+
+		result, err := h.DB.Exec(`INSERT INTO runnables (job_id, name, type, config, status) VALUES (?, ?, ?, ?, ?)`,
+			job.ID, runnable.Name, runnable.Type, string(configJSON), "pending")
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+
+		runnableID, _ := result.LastInsertId()
+
+		// Create deployments for this runnable
+		for _, output := range runnable.Outputs {
+			outputConfigJSON, err := json.Marshal(output.Config)
+			if err != nil {
+				return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+			}
+
+			_, err = h.DB.Exec(`INSERT INTO deployments (runnable_id, output_type, config, status) VALUES (?, ?, ?, ?)`,
+				runnableID, output.Type, string(outputConfigJSON), "pending")
+			if err != nil {
+				return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+			}
+		}
+	}
+
 	return c.Status(201).JSON(job)
 }
 
@@ -209,11 +246,43 @@ func (h *Handler) GetJobDetails(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
 
+	// Get runnables
+	var runnables []models.Runnable
+	err = h.DB.Select(&runnables, "SELECT * FROM runnables WHERE job_id = ?", id)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	// Get deployments for all runnables
+	var deployments []models.Deployment
+	if len(runnables) > 0 {
+		runnableIDs := make([]int, len(runnables))
+		for i, r := range runnables {
+			runnableIDs[i] = r.ID
+		}
+
+		// Build IN clause for SQL
+		inClause := strings.Repeat("?,", len(runnableIDs)-1) + "?"
+		query := fmt.Sprintf("SELECT * FROM deployments WHERE runnable_id IN (%s)", inClause)
+
+		args := make([]interface{}, len(runnableIDs))
+		for i, id := range runnableIDs {
+			args[i] = id
+		}
+
+		err = h.DB.Select(&deployments, query, args...)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+	}
+
 	details := models.JobWithDetails{
 		Job:          job,
 		Pipeline:     pipeline,
 		Steps:        steps,
 		Environments: environments,
+		Runnables:    runnables,
+		Deployments:  deployments,
 	}
 
 	return c.JSON(details)

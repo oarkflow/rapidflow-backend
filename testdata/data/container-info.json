@@ -1,0 +1,10 @@
+{
+  "artifact_path": "container:dc42f0299fa9df0a4d502f8e893eeff43e360b417af1189e77daab8114a9f331:my-go-server-prod",
+  "container_id": "dc42f0299fa9df0a4d502f8e893eeff43e360b417af1189e77daab8114a9f331",
+  "container_name": "my-go-server-prod",
+  "deployment_id": 10,
+  "runnable_name": "production-container",
+  "runnable_type": "docker_container",
+  "status": "running",
+  "type": "docker_container"
+}

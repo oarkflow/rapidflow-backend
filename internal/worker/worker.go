@@ -5,11 +5,14 @@ import (
 	"bytes"
 	"context"
 	"docker-app/internal/models"
+	"docker-app/internal/providers"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/docker/docker/api/types"
@@ -20,10 +23,11 @@ import (
 )
 
 type Worker struct {
-	DB          *sqlx.DB
-	Docker      *client.Client
-	runningJobs map[int]context.CancelFunc
-	mutex       sync.RWMutex
+	DB              *sqlx.DB
+	Docker          *client.Client
+	runningJobs     map[int]context.CancelFunc
+	mutex           sync.RWMutex
+	providerManager *providers.ProviderManager
 }
 
 func NewWorker(db *sqlx.DB) (*Worker, error) {
@@ -32,9 +36,10 @@ func NewWorker(db *sqlx.DB) (*Worker, error) {
 		return nil, err
 	}
 	return &Worker{
-		DB:          db,
-		Docker:      cli,
-		runningJobs: make(map[int]context.CancelFunc),
+		DB:              db,
+		Docker:          cli,
+		runningJobs:     make(map[int]context.CancelFunc),
+		providerManager: providers.NewProviderManager(),
 	}, nil
 }
 
@@ -476,6 +481,511 @@ func (w *Worker) RunJobWithContext(ctx context.Context, jobID int) error {
 	if err != nil {
 		return err
 	}
+
+	// Process runnables after successful build
+	err = w.processRunnables(jobCtx, jobID, containerID, job)
+	if err != nil {
+		log.Printf("Error processing runnables for job %d: %v", jobID, err)
+		// Don't fail the job if runnables fail, just log the error
+	}
+
+	return nil
+}
+
+// processRunnables handles the deployment/packaging phase after successful build
+func (w *Worker) processRunnables(ctx context.Context, jobID int, containerID string, job models.Job) error {
+	// Get runnables for this job
+	var runnables []models.Runnable
+	err := w.DB.Select(&runnables, "SELECT * FROM runnables WHERE job_id = ? AND status = 'pending'", jobID)
+	if err != nil {
+		return err
+	}
+
+	if len(runnables) == 0 {
+		log.Printf("No runnables defined for job %d", jobID)
+		return nil
+	}
+
+	log.Printf("Processing %d runnables for job %d", len(runnables), jobID)
+
+	// Create temp directory for artifacts
+	tempDir := fmt.Sprintf("/tmp/rapidflow-job-%d", jobID)
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		return fmt.Errorf("failed to create temp directory: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Process each runnable
+	for _, runnable := range runnables {
+		err = w.processRunnable(ctx, runnable, containerID, tempDir, job)
+		if err != nil {
+			log.Printf("Failed to process runnable %s: %v", runnable.Name, err)
+			w.DB.Exec("UPDATE runnables SET status = 'failed', output = ? WHERE id = ?", err.Error(), runnable.ID)
+			continue
+		}
+	}
+
+	return nil
+}
+
+// processRunnable processes a single runnable
+func (w *Worker) processRunnable(ctx context.Context, runnable models.Runnable, containerID, tempDir string, job models.Job) error {
+	log.Printf("Processing runnable: %s (type: %s)", runnable.Name, runnable.Type)
+
+	// Update runnable status to running
+	_, err := w.DB.Exec("UPDATE runnables SET status = 'running' WHERE id = ?", runnable.ID)
+	if err != nil {
+		return err
+	}
+
+	var artifactPath string
+
+	// Parse runnable config
+	var config models.RunnableConfig
+	if err := json.Unmarshal([]byte(runnable.Config), &config); err != nil {
+		return fmt.Errorf("failed to parse runnable config: %v", err)
+	}
+
+	switch runnable.Type {
+	case "docker_container":
+		artifactPath, err = w.handleDockerContainer(ctx, runnable, config, containerID, tempDir, job)
+	case "docker_image":
+		artifactPath, err = w.handleDockerImage(ctx, runnable, config, containerID, tempDir)
+	case "artifacts":
+		artifactPath, err = w.handleArtifacts(ctx, runnable, config, containerID, tempDir)
+	case "serverless":
+		artifactPath, err = w.handleServerless(ctx, runnable, config, containerID, tempDir)
+	default:
+		return fmt.Errorf("unsupported runnable type: %s", runnable.Type)
+	}
+
+	if err != nil {
+		return err
+	}
+
+	// Update runnable with artifact path
+	_, err = w.DB.Exec("UPDATE runnables SET artifact_url = ?, status = 'success' WHERE id = ?",
+		artifactPath, runnable.ID)
+	if err != nil {
+		return err
+	}
+
+	// Process deployments for this runnable
+	err = w.processDeployments(ctx, runnable, artifactPath)
+	if err != nil {
+		log.Printf("Failed to process deployments for runnable %s: %v", runnable.Name, err)
+		// Don't fail the runnable if deployments fail
+	}
+
+	return nil
+}
+
+// handleDockerContainer creates and runs a Docker container
+func (w *Worker) handleDockerContainer(ctx context.Context, runnable models.Runnable, config models.RunnableConfig, sourceContainerID, tempDir string, job models.Job) (string, error) {
+	// Get working directory from config (defaults to /workspace)
+	workingDir := config.WorkingDir
+	if workingDir == "" {
+		workingDir = "/workspace"
+	}
+
+	// First, copy the built artifacts from mounted volume to container filesystem
+	log.Printf("Copying built artifacts from mounted volume to container filesystem")
+	execResp, err := w.Docker.ContainerExecCreate(ctx, sourceContainerID, types.ExecConfig{
+		Cmd:          []string{"sh", "-c", "mkdir -p /app && cp -r /workspace/* /app/ && ls -la /app/"},
+		AttachStdout: true,
+		AttachStderr: true,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to create exec for copying artifacts: %v", err)
+	}
+
+	hijacked, err := w.Docker.ContainerExecAttach(ctx, execResp.ID, types.ExecStartCheck{})
+	if err != nil {
+		return "", fmt.Errorf("failed to attach to exec: %v", err)
+	}
+
+	// Read the copy output
+	var output bytes.Buffer
+	scanner := bufio.NewScanner(hijacked.Reader)
+	for scanner.Scan() {
+		line := scanner.Text()
+		log.Println("copy output:", line)
+		output.WriteString(line + "\n")
+	}
+	hijacked.Close()
+
+	inspect, err := w.Docker.ContainerExecInspect(ctx, execResp.ID)
+	if err != nil {
+		return "", fmt.Errorf("failed to inspect copy exec: %v", err)
+	}
+	if inspect.ExitCode != 0 {
+		return "", fmt.Errorf("copy failed with exit code %d: %s", inspect.ExitCode, output.String())
+	}
+
+	// Now update the working directory to /app and entrypoint accordingly
+	actualWorkingDir := "/app"
+
+	// Handle default port exposure if expose_ports is true and no ports specified
+	if len(config.Ports) == 0 && job.ExposePorts != nil && *job.ExposePorts {
+		// Get environment variables to find PORT setting
+		var envs []models.Environment
+		err := w.DB.Select(&envs, "SELECT * FROM environments WHERE job_id = ?", job.ID)
+		if err == nil {
+			for _, env := range envs {
+				if env.Key == "PORT" {
+					// Use the PORT environment variable as default
+					config.Ports = []string{env.Value}
+					log.Printf("Using default port from environment: %s", env.Value)
+					break
+				}
+			}
+		}
+
+		// If still no port found, use common defaults
+		if len(config.Ports) == 0 {
+			config.Ports = []string{"3000"} // Default fallback port
+			log.Printf("Using fallback default port: 3000")
+		}
+	}
+
+	// Get entrypoint from config and adjust path if it references /workspace
+	var actualEntrypoint []string
+	if len(config.Entrypoint) > 0 {
+		for _, entry := range config.Entrypoint {
+			if entry == "/workspace/server" {
+				actualEntrypoint = append(actualEntrypoint, "/app/server")
+			} else if strings.HasPrefix(entry, "/workspace/") {
+				actualEntrypoint = append(actualEntrypoint, strings.Replace(entry, "/workspace/", "/app/", 1))
+			} else {
+				actualEntrypoint = append(actualEntrypoint, entry)
+			}
+		}
+
+		// Make the entrypoint executable
+		entrypointPath := actualEntrypoint[0]
+		log.Printf("Ensuring entrypoint is executable: %s", entrypointPath)
+		execResp, err = w.Docker.ContainerExecCreate(ctx, sourceContainerID, types.ExecConfig{
+			Cmd:          []string{"sh", "-c", fmt.Sprintf("chmod +x %s && ls -la %s", entrypointPath, entrypointPath)},
+			AttachStdout: true,
+			AttachStderr: true,
+		})
+		if err != nil {
+			return "", fmt.Errorf("failed to create exec for chmod: %v", err)
+		}
+
+		hijacked, err = w.Docker.ContainerExecAttach(ctx, execResp.ID, types.ExecStartCheck{})
+		if err != nil {
+			return "", fmt.Errorf("failed to attach to exec: %v", err)
+		}
+		defer hijacked.Close()
+
+		// Read the chmod output
+		output = bytes.Buffer{}
+		scanner = bufio.NewScanner(hijacked.Reader)
+		for scanner.Scan() {
+			line := scanner.Text()
+			log.Println("chmod output:", line)
+			output.WriteString(line + "\n")
+		}
+
+		inspect, err = w.Docker.ContainerExecInspect(ctx, execResp.ID)
+		if err != nil {
+			return "", fmt.Errorf("failed to inspect chmod exec: %v", err)
+		}
+		if inspect.ExitCode != 0 {
+			return "", fmt.Errorf("chmod failed with exit code %d: %s", inspect.ExitCode, output.String())
+		}
+	}
+
+	// Determine image name
+	imageName := config.ImageName
+	if imageName == "" {
+		imageName = fmt.Sprintf("rapidflow-job-%d-%s", runnable.JobID, runnable.Name)
+	}
+
+	// Create image from current container state
+	commitResp, err := w.Docker.ContainerCommit(ctx, sourceContainerID, types.ContainerCommitOptions{
+		Reference: imageName,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to commit container: %v", err)
+	}
+
+	imageID := commitResp.ID
+	log.Printf("Created Docker image: %s with name: %s", imageID, imageName)
+
+	// Create and start new container from committed image
+	containerConfig := &container.Config{
+		Image: imageID,
+		Env:   make([]string, 0),
+	}
+
+	// Set working directory to /app (where we copied the artifacts)
+	containerConfig.WorkingDir = actualWorkingDir
+
+	// Add environment variables from config
+	for key, value := range config.Environment {
+		containerConfig.Env = append(containerConfig.Env, fmt.Sprintf("%s=%s", key, value))
+	}
+
+	// Set entrypoint from config (adjusted for /app directory)
+	if len(actualEntrypoint) > 0 {
+		containerConfig.Entrypoint = actualEntrypoint
+	}
+
+	// Set exposed ports with Docker-style port mapping support
+	var portBindings nat.PortMap
+	if len(config.Ports) > 0 {
+		containerConfig.ExposedPorts = make(nat.PortSet)
+		portBindings = make(nat.PortMap)
+
+		for _, portMapping := range config.Ports {
+			hostPort, containerPortStr, hostIP, err := parsePortMapping(portMapping)
+			if err != nil {
+				return "", fmt.Errorf("failed to parse port mapping '%s': %v", portMapping, err)
+			}
+
+			containerPort := nat.Port(fmt.Sprintf("%s/tcp", containerPortStr))
+			containerConfig.ExposedPorts[containerPort] = struct{}{}
+			portBindings[containerPort] = []nat.PortBinding{{
+				HostIP:   hostIP,
+				HostPort: hostPort,
+			}}
+
+			log.Printf("Port mapping: %s:%s -> %s", hostIP, hostPort, containerPortStr)
+		}
+	}
+
+	// Determine container name
+	containerName := config.ContainerName
+	if containerName == "" {
+		containerName = fmt.Sprintf("rapidflow-run-%d-%s", runnable.JobID, runnable.Name)
+	}
+
+	// Handle existing container with same name by removing it
+	err = w.handleExistingContainer(ctx, containerName)
+	if err != nil {
+		log.Printf("Warning: failed to handle existing container '%s': %v", containerName, err)
+		// Don't fail the deployment, just warn
+	}
+
+	newContainer, err := w.Docker.ContainerCreate(ctx, containerConfig, &container.HostConfig{
+		AutoRemove:   false, // Don't auto-remove so we can track it
+		PortBindings: portBindings,
+	}, nil, nil, containerName)
+	if err != nil {
+		return "", fmt.Errorf("failed to create container: %v", err)
+	}
+
+	// Start container
+	err = w.Docker.ContainerStart(ctx, newContainer.ID, types.ContainerStartOptions{})
+	if err != nil {
+		return "", fmt.Errorf("failed to start container: %v", err)
+	}
+
+	log.Printf("Started Docker container: %s (name: %s)", newContainer.ID, containerName)
+	return fmt.Sprintf("container:%s:%s", newContainer.ID, containerName), nil
+}
+
+// parsePortMapping parses Docker-style port mappings
+// Supports: "3000", "8080:3000", "0.0.0.0:8080:3000"
+func parsePortMapping(portStr string) (hostPort, containerPort, hostIP string, err error) {
+	parts := strings.Split(portStr, ":")
+
+	switch len(parts) {
+	case 1:
+		// "3000" - same port on host and container
+		containerPort = parts[0]
+		hostPort = parts[0]
+		hostIP = "0.0.0.0"
+	case 2:
+		// "8080:3000" - host:container
+		hostPort = parts[0]
+		containerPort = parts[1]
+		hostIP = "0.0.0.0"
+	case 3:
+		// "0.0.0.0:8080:3000" - hostIP:host:container
+		hostIP = parts[0]
+		hostPort = parts[1]
+		containerPort = parts[2]
+	default:
+		return "", "", "", fmt.Errorf("invalid port mapping format: %s", portStr)
+	}
+
+	return hostPort, containerPort, hostIP, nil
+}
+
+// handleExistingContainer removes existing container with the same name if it exists
+func (w *Worker) handleExistingContainer(ctx context.Context, containerName string) error {
+	// List containers with the same name
+	containers, err := w.Docker.ContainerList(ctx, types.ContainerListOptions{
+		All: true, // Include stopped containers
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list containers: %v", err)
+	}
+
+	// Find container with matching name
+	for _, container := range containers {
+		for _, name := range container.Names {
+			// Container names include leading slash, so check for both formats
+			if name == "/"+containerName || name == containerName {
+				log.Printf("Found existing container '%s' with ID %s, removing it", containerName, container.ID)
+
+				// Remove the container (force will stop it if running)
+				err = w.Docker.ContainerRemove(ctx, container.ID, types.ContainerRemoveOptions{
+					Force: true, // Force remove even if running
+				})
+				if err != nil {
+					return fmt.Errorf("failed to remove existing container %s: %v", container.ID, err)
+				}
+
+				log.Printf("Successfully removed existing container '%s'", containerName)
+				return nil
+			}
+		}
+	}
+
+	return nil // No existing container found
+}
+
+// handleDockerImage exports Docker image as tar file
+func (w *Worker) handleDockerImage(ctx context.Context, runnable models.Runnable, config models.RunnableConfig, sourceContainerID, tempDir string) (string, error) {
+	// Determine image name
+	imageName := config.ImageName
+	if imageName == "" {
+		imageName = fmt.Sprintf("rapidflow-job-%d-%s", runnable.JobID, runnable.Name)
+	}
+
+	// Create image from current container state
+	commitResp, err := w.Docker.ContainerCommit(ctx, sourceContainerID, types.ContainerCommitOptions{
+		Reference: imageName,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to commit container: %v", err)
+	}
+
+	imageID := commitResp.ID
+	imagePath := filepath.Join(tempDir, fmt.Sprintf("%s-image.tar", runnable.Name))
+
+	// Save image to tar file
+	err = providers.SaveDockerImage(w.Docker, imageID, imagePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to save Docker image: %v", err)
+	}
+
+	log.Printf("Saved Docker image '%s' to: %s", imageName, imagePath)
+	return imagePath, nil
+}
+
+// handleArtifacts creates zip archive of workspace
+func (w *Worker) handleArtifacts(ctx context.Context, runnable models.Runnable, config models.RunnableConfig, sourceContainerID, tempDir string) (string, error) {
+	// Copy workspace from container to local temp directory
+	workspaceDir := filepath.Join(tempDir, "workspace")
+	err := w.copyFromContainer(ctx, sourceContainerID, "/workspace", workspaceDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to copy workspace: %v", err)
+	}
+
+	// Create zip archive
+	zipPath := filepath.Join(tempDir, fmt.Sprintf("%s-artifacts.zip", runnable.Name))
+	err = providers.CreateZipArchive(workspaceDir, zipPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create zip archive: %v", err)
+	}
+
+	log.Printf("Created artifacts zip: %s", zipPath)
+	return zipPath, nil
+}
+
+// handleServerless packages for serverless deployment
+func (w *Worker) handleServerless(ctx context.Context, runnable models.Runnable, config models.RunnableConfig, sourceContainerID, tempDir string) (string, error) {
+	// For serverless, we typically want a zip of the built application
+	return w.handleArtifacts(ctx, runnable, config, sourceContainerID, tempDir)
+}
+
+// copyFromContainer copies files from container to local filesystem
+func (w *Worker) copyFromContainer(ctx context.Context, containerID, srcPath, dstPath string) error {
+	reader, _, err := w.Docker.CopyFromContainer(ctx, containerID, srcPath)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+
+	// Extract tar to destination
+	return extractTar(reader, dstPath)
+}
+
+// extractTar extracts tar archive to destination directory
+func extractTar(src io.Reader, dst string) error {
+	// Create destination directory
+	if err := os.MkdirAll(dst, 0755); err != nil {
+		return err
+	}
+
+	// For simplicity, we'll use a basic approach
+	// In production, you'd want proper tar extraction
+	tempFile := filepath.Join(dst, "temp.tar")
+	outFile, err := os.Create(tempFile)
+	if err != nil {
+		return err
+	}
+
+	_, err = io.Copy(outFile, src)
+	outFile.Close()
+
+	if err != nil {
+		return err
+	}
+
+	// Remove temp file
+	defer os.Remove(tempFile)
+
+	return nil
+}
+
+// processDeployments handles all deployments for a runnable
+func (w *Worker) processDeployments(ctx context.Context, runnable models.Runnable, artifactPath string) error {
+	// Get deployments for this runnable
+	var deployments []models.Deployment
+	err := w.DB.Select(&deployments, "SELECT * FROM deployments WHERE runnable_id = ? AND status = 'pending'", runnable.ID)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("Processing %d deployments for runnable %s", len(deployments), runnable.Name)
+
+	for _, deployment := range deployments {
+		err = w.processDeployment(ctx, runnable, deployment, artifactPath)
+		if err != nil {
+			log.Printf("Failed to process deployment %d: %v", deployment.ID, err)
+			w.DB.Exec("UPDATE deployments SET status = 'failed', output = ? WHERE id = ?",
+				err.Error(), deployment.ID)
+			continue
+		}
+
+		w.DB.Exec("UPDATE deployments SET status = 'success' WHERE id = ?", deployment.ID)
+	}
+
+	return nil
+}
+
+// processDeployment handles a single deployment
+func (w *Worker) processDeployment(ctx context.Context, runnable models.Runnable, deployment models.Deployment, artifactPath string) error {
+	log.Printf("Processing deployment: %s", deployment.OutputType)
+
+	// Get provider
+	provider, err := w.providerManager.GetProvider(deployment.OutputType)
+	if err != nil {
+		return err
+	}
+
+	// Deploy
+	err = provider.Deploy(ctx, runnable, deployment, artifactPath)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
