@@ -1,0 +1,74 @@
+name: "VPS Deployment Pipeline"
+language: "golang"
+version: "1.25"
+branch: "main"
+folder: "./testdata/my-go-app"
+expose_ports: true
+env:
+  GOOS: "linux"
+  GOARCH: "amd64"
+  PORT: "3000"
+  DATABASE_URL: "sqlite://db.sqlite"
+
+steps:
+  - type: "bash"
+    content: |
+      apt-get update && apt-get install -y wget curl git build-essential
+      echo "Tools installed"
+    files:
+      config.json: |
+        {
+          "port": 3000,
+          "database": "sqlite://db.sqlite"
+        }
+
+  - type: "bash"
+    content: |
+      cd /workspace
+      ls -la
+
+  - type: "bash"
+    content: |
+      cd /workspace
+      go mod download
+      go build -o server .
+      echo "Build completed"
+
+  - type: "bash"
+    content: |
+      cd /workspace
+      ./server > /tmp/server.log 2>&1 &
+      SERVER_PID=$!
+      sleep 3
+      curl http://localhost:3000/health && echo "Health check passed" || echo "Health check failed"
+      kill $SERVER_PID
+      echo "Server logs:"
+      cat /tmp/server.log
+
+# Deploy to VPS with Docker and configure Nginx Proxy Manager
+runnables:
+  - name: "vps-web-server"
+    type: "docker_container"
+    enabled: true
+    container_name: "my-web-app-prod"
+    image_name: "my-web-app:prod"
+    entrypoint: ["/workspace/server"]
+    working_dir: "/workspace"
+    ports: ["3000"]
+    environment:
+      ENV: "production"
+      DATABASE_URL: "sqlite://db.sqlite"
+    outputs:
+      - type: "vps"
+        config:
+          host: "your-vps-host.com"
+          ssh_user: "root"
+          ssh_key_path: "/path/to/ssh/key"
+          docker_host: "unix:///var/run/docker.sock"
+          nginx_pm_url: "http://your-vps-host.com:81"
+          nginx_pm_user: "admin@example.com"
+          nginx_pm_pass: "your-admin-password"
+          domain: "myapp.example.com"
+          service_port: "3000"
+          container_name: "my-web-app-prod"
+          image_name: "my-web-app:prod"

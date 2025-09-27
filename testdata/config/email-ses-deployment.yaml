@@ -1,0 +1,30 @@
+name: email-ses-deployment-demo
+description: "Demo pipeline that builds a Go app and sends notification via AWS SES"
+
+runnable:
+  type: docker
+  config:
+    dockerfile: Dockerfile
+    context: .
+    build_args:
+      GO_VERSION: "1.21"
+
+deployments:
+  - name: email-ses-notification
+    type: email
+    config:
+      transport: "ses"
+      region: "us-east-1"
+      access_key_id: "your-aws-access-key-id"
+      secret_access_key: "your-aws-secret-access-key"
+      from: "builds@yourdomain.com"
+      to:
+        - "team@yourdomain.com"
+        - "devops@yourdomain.com"
+      subject: "Build Completed Successfully"
+      body: "The latest build has been completed and is ready for deployment."
+
+output:
+  type: file
+  config:
+    filename: "app.tar.gz"

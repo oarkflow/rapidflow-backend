@@ -1,0 +1,83 @@
+name: "VPS Nginx Deployment Pipeline"
+language: "golang"
+version: "1.25"
+branch: "main"
+folder: "./testdata/my-go-app"
+expose_ports: true
+env:
+  GOOS: "linux"
+  GOARCH: "amd64"
+  PORT: "3000"
+  DATABASE_URL: "sqlite://db.sqlite"
+
+steps:
+  - type: "bash"
+    content: |
+      apt-get update && apt-get install -y wget curl git build-essential
+      echo "Tools installed"
+    files:
+      config.json: |
+        {
+          "port": 3000,
+          "database": "sqlite://db.sqlite"
+        }
+
+  - type: "bash"
+    content: |
+      cd /workspace
+      ls -la
+
+  - type: "bash"
+    content: |
+      cd /workspace
+      go mod download
+      go build -o server .
+      echo "Build completed"
+
+  - type: "bash"
+    content: |
+      cd /workspace
+      ./server > /tmp/server.log 2>&1 &
+      SERVER_PID=$!
+      sleep 3
+      curl http://localhost:3000/health && echo "Health check passed" || echo "Health check failed"
+      kill $SERVER_PID
+      echo "Server logs:"
+      cat /tmp/server.log
+
+# Deploy to VPS with native Nginx (not Nginx Proxy Manager)
+runnables:
+  - name: "nginx-web-server"
+    type: "docker_container"
+    enabled: true
+    container_name: "my-web-app-prod"
+    image_name: "my-web-app:prod"
+    entrypoint: ["/workspace/server"]
+    working_dir: "/workspace"
+    ports: ["3000"]
+    environment:
+      ENV: "production"
+      DATABASE_URL: "sqlite://db.sqlite"
+    outputs:
+      - type: "nginx"
+        config:
+          # VPS connection details
+          host: "your-vps-host.com"
+          ssh_user: "root"
+          ssh_key_path: "/path/to/ssh/key"
+
+          # Docker configuration
+          docker_host: "unix:///var/run/docker.sock"
+
+          # Service configuration
+          domain: "myapp.example.com"
+          service_port: "3000"
+          container_name: "my-web-app-prod"
+          image_name: "my-web-app:prod"
+
+          # Nginx configuration
+          nginx_config_path: "/etc/nginx/sites-enabled"
+          nginx_restart_cmd: "systemctl restart nginx"
+          ssl: true
+          ssl_cert_path: "/etc/letsencrypt/live/myapp.example.com/fullchain.pem"
+          ssl_key_path: "/etc/letsencrypt/live/myapp.example.com/privkey.pem"

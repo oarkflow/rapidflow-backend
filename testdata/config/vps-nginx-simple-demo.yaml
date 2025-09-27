@@ -1,0 +1,64 @@
+name: "Simple VPS Nginx Deployment Demo"
+language: "golang"
+version: "1.25"
+branch: "main"
+folder: "./testdata/my-go-app"
+expose_ports: true
+env:
+  GOOS: "linux"
+  GOARCH: "amd64"
+  PORT: "8080"
+
+steps:
+  - type: "bash"
+    content: |
+      cd /workspace
+      echo "Building simple web server..."
+      go mod download
+      go build -o web-server .
+      echo "Build completed successfully"
+
+  - type: "bash"
+    content: |
+      cd /workspace
+      echo "Testing server locally..."
+      ./web-server > /tmp/server.log 2>&1 &
+      SERVER_PID=$!
+      sleep 2
+      curl -f http://localhost:8080/health && echo " ✓ Health check passed" || echo " ✗ Health check failed"
+      kill $SERVER_PID 2>/dev/null || true
+
+# Deploy to VPS with native Nginx configuration
+runnables:
+  - name: "production-nginx-server"
+    type: "docker_container"
+    enabled: true
+    container_name: "demo-app-nginx"
+    image_name: "demo-web-app:latest"
+    entrypoint: ["/workspace/web-server"]
+    working_dir: "/workspace"
+    ports: ["8080"]
+    environment:
+      ENV: "production"
+      PORT: "8080"
+    outputs:
+      - type: "nginx"
+        config:
+          # VPS connection
+          host: "your-vps-ip-or-domain.com"
+          ssh_user: "root"
+          ssh_key_path: "~/.ssh/id_rsa"
+
+          # Docker configuration
+          docker_host: "unix:///var/run/docker.sock"
+
+          # Service configuration
+          domain: "demo-app.yourdomain.com"
+          service_port: "8080"
+          container_name: "demo-app-nginx"
+          image_name: "demo-web-app:latest"
+
+          # Nginx configuration (customize paths as needed)
+          nginx_config_path: "/etc/nginx/sites-available"
+          nginx_restart_cmd: "systemctl reload nginx"
+          ssl: false # Set to true and configure SSL paths for HTTPS

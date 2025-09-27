@@ -1,0 +1,64 @@
+name: "Simple VPS Deployment Demo"
+language: "golang"
+version: "1.25"
+branch: "main"
+folder: "./testdata/my-go-app"
+expose_ports: true
+env:
+  GOOS: "linux"
+  GOARCH: "amd64"
+  PORT: "8080"
+
+steps:
+  - type: "bash"
+    content: |
+      cd /workspace
+      echo "Building simple web server..."
+      go mod download
+      go build -o web-server .
+      echo "Build completed successfully"
+
+  - type: "bash"
+    content: |
+      cd /workspace
+      echo "Testing server locally..."
+      ./web-server > /tmp/server.log 2>&1 &
+      SERVER_PID=$!
+      sleep 2
+      curl -f http://localhost:8080/health && echo " ✓ Health check passed" || echo " ✗ Health check failed"
+      kill $SERVER_PID 2>/dev/null || true
+
+# Deploy to VPS and configure Nginx Proxy Manager
+runnables:
+  - name: "production-web-server"
+    type: "docker_container"
+    enabled: true
+    container_name: "demo-app-prod"
+    image_name: "demo-web-app:latest"
+    entrypoint: ["/workspace/web-server"]
+    working_dir: "/workspace"
+    ports: ["8080"]
+    environment:
+      ENV: "production"
+      PORT: "8080"
+    outputs:
+      - type: "vps"
+        config:
+          # VPS connection details
+          host: "your-vps-ip-or-domain.com"
+          ssh_user: "root"
+          ssh_key_path: "~/.ssh/id_rsa"
+
+          # Docker configuration
+          docker_host: "unix:///var/run/docker.sock"
+
+          # Nginx Proxy Manager configuration
+          nginx_pm_url: "http://your-vps-ip-or-domain.com:81"
+          nginx_pm_user: "admin@yourdomain.com"
+          nginx_pm_pass: "your-nginx-pm-password"
+
+          # Service configuration
+          domain: "demo-app.yourdomain.com"
+          service_port: "8080"
+          container_name: "demo-app-prod"
+          image_name: "demo-web-app:latest"

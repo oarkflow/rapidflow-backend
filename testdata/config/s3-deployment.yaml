@@ -1,0 +1,24 @@
+name: s3-deployment-demo
+description: "Demo pipeline that builds a Go app and uploads to S3"
+
+runnable:
+  type: docker
+  config:
+    dockerfile: Dockerfile
+    context: .
+    build_args:
+      GO_VERSION: "1.21"
+
+deployments:
+  - name: s3-upload
+    type: s3
+    config:
+      bucket: "my-build-artifacts"
+      region: "us-east-1"
+      key: "artifacts/app-${BUILD_ID}.tar.gz"
+      acl: "private"
+
+output:
+  type: file
+  config:
+    filename: "app.tar.gz"

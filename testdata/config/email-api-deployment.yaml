@@ -1,0 +1,31 @@
+name: email-api-deployment-demo
+description: "Demo pipeline that builds a Go app and sends notification via HTTP API (SendGrid)"
+
+runnable:
+  type: docker
+  config:
+    dockerfile: Dockerfile
+    context: .
+    build_args:
+      GO_VERSION: "1.21"
+
+deployments:
+  - name: email-api-notification
+    type: email
+    config:
+      transport: "http"
+      api_url: "https://api.sendgrid.com/v3/mail/send"
+      api_key: "your-sendgrid-api-key"
+      headers:
+        "Content-Type": "application/json"
+        "Authorization": "Bearer your-sendgrid-api-key"
+      from: "builds@yourdomain.com"
+      to:
+        - "notifications@yourdomain.com"
+      subject: "Automated Build Notification"
+      body: "A new build artifact has been generated and is available for download."
+
+output:
+  type: file
+  config:
+    filename: "app.tar.gz"

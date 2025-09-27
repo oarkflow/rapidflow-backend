@@ -1,0 +1,30 @@
+name: email-deployment-demo
+description: "Demo pipeline that builds a Go app and sends it via email"
+
+runnable:
+  type: docker
+  config:
+    dockerfile: Dockerfile
+    context: .
+    build_args:
+      GO_VERSION: "1.21"
+
+deployments:
+  - name: email-notification
+    type: email
+    config:
+      smtp_host: "smtp.gmail.com"
+      smtp_port: 587
+      username: "your-email@gmail.com"
+      password: "your-app-password"
+      from: "your-email@gmail.com"
+      to:
+        - "recipient1@example.com"
+        - "recipient2@example.com"
+      subject: "Build Artifact Delivery"
+      body: "Please find the latest build artifact attached."
+
+output:
+  type: file
+  config:
+    filename: "app.tar.gz"
