@@ -112,6 +112,7 @@ func startServer() error {
 	app.Post("/pipelines", handler.CreatePipeline)
 	app.Get("/pipelines", handler.GetPipelines)
 	app.Get("/pipelines/:id", handler.GetPipeline)
+	app.Get("/pipelines/:id/jobs", handler.GetPipelineJobs)
 	app.Get("/jobs", handler.GetJobs)
 	app.Post("/pipelines/:pipelineID/jobs", handler.CreateJob)
 	app.Get("/jobs/:id", handler.GetJob)

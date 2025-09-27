@@ -12,8 +12,75 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/jmoiron/sqlx"
+	"github.com/oarkflow/bcl"
 	"gopkg.in/yaml.v3"
 )
+
+// ConfigFormat represents the format of pipeline configuration
+type ConfigFormat string
+
+const (
+	FormatYAML ConfigFormat = "yaml"
+	FormatJSON ConfigFormat = "json"
+	FormatBCL  ConfigFormat = "bcl"
+)
+
+// detectConfigFormat detects the format of the configuration string
+func detectConfigFormat(config string) ConfigFormat {
+	config = strings.TrimSpace(config)
+
+	// Check for JSON (starts with { or [)
+	if strings.HasPrefix(config, "{") || strings.HasPrefix(config, "[") {
+		return FormatJSON
+	}
+
+	// Check for YAML (contains : or - at beginning of lines)
+	lines := strings.Split(config, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.Contains(line, ":") || strings.HasPrefix(line, "-") {
+			return FormatYAML
+		}
+	}
+
+	// Default to YAML for backward compatibility
+	return FormatYAML
+}
+
+// unmarshalConfig unmarshals the configuration string based on detected format
+func unmarshalConfig(configStr string, config *models.PipelineConfig) error {
+	format := detectConfigFormat(configStr)
+
+	switch format {
+	case FormatJSON:
+		return json.Unmarshal([]byte(configStr), config)
+	case FormatBCL:
+		// For BCL, we need to use UnmarshalJSON after parsing
+		// First parse the BCL to get AST nodes, then convert to JSON and unmarshal
+		nodes, err := bcl.Unmarshal([]byte(configStr), config)
+		if err != nil {
+			return err
+		}
+		// If nodes are returned but we want to unmarshal into config, we might need a different approach
+		// For now, let's try to use the config directly if it was modified
+		if len(nodes) > 0 {
+			// Convert to JSON and then unmarshal
+			jsonData, err := bcl.MarshalJSON(config)
+			if err != nil {
+				return err
+			}
+			return json.Unmarshal(jsonData, config)
+		}
+		return nil
+	case FormatYAML:
+		fallthrough
+	default:
+		return yaml.Unmarshal([]byte(configStr), config)
+	}
+}
 
 type Handler struct {
 	DB     *sqlx.DB
@@ -54,6 +121,24 @@ func (h *Handler) GetPipelines(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
+
+	// Unmarshal config for each pipeline
+	for i, pipeline := range pipelines {
+		var config models.PipelineConfig
+		if err := unmarshalConfig(pipeline.Config, &config); err != nil {
+			// If unmarshaling fails, keep the raw config but log the error
+			log.Printf("Failed to unmarshal config for pipeline %d: %v", pipeline.ID, err)
+			continue
+		}
+		configBytes, err := json.Marshal(config)
+		if err != nil {
+			log.Printf("Failed to marshal config to JSON for pipeline %d: %v", pipeline.ID, err)
+			continue
+		}
+		pipeline.Config = string(configBytes)
+		pipelines[i] = pipeline
+	}
+
 	return c.JSON(pipelines)
 }
 
@@ -64,7 +149,39 @@ func (h *Handler) GetPipeline(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"error": "Pipeline not found"})
 	}
+
+	// Try to unmarshal the config to validate format
+	var config models.PipelineConfig
+	if err := unmarshalConfig(pipeline.Config, &config); err != nil {
+		log.Printf("Failed to unmarshal config for pipeline %d: %v", pipeline.ID, err)
+		// Return pipeline with raw config and error info
+		return c.JSON(fiber.Map{
+			"pipeline":            pipeline,
+			"config_format_error": err.Error(),
+		})
+	}
+	configBytes, err := json.Marshal(config)
+	if err != nil {
+		log.Printf("Failed to marshal config to JSON for pipeline %d: %v", pipeline.ID, err)
+		return c.JSON(fiber.Map{
+			"pipeline":            pipeline,
+			"config_format_error": err.Error(),
+		})
+	}
+	pipeline.Config = string(configBytes)
+
+	// Return pipeline with parsed config info
 	return c.JSON(pipeline)
+}
+
+func (h *Handler) GetPipelineJobs(c *fiber.Ctx) error {
+	pipelineID := c.Params("id")
+	var jobs []models.Job
+	err := h.DB.Select(&jobs, "SELECT * FROM jobs WHERE pipeline_id = ? ORDER BY created_at DESC", pipelineID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(jobs)
 }
 
 func (h *Handler) GetJobs(c *fiber.Ctx) error {
@@ -87,15 +204,11 @@ func (h *Handler) CreateJob(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"error": "pipeline not found"})
 	}
-	// Parse config
+	// Parse config using format detection
 	var config models.PipelineConfig
-	// Assume config is JSON for simplicity, but user said YAML, wait.
-	// User said configurations, probably YAML.
-	// But for API, perhaps accept JSON or YAML.
-	// For now, assume JSON.
-	err = yaml.Unmarshal([]byte(pipeline.Config), &config)
+	err = unmarshalConfig(pipeline.Config, &config)
 	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": "invalid config"})
+		return c.Status(400).JSON(fiber.Map{"error": "invalid config: " + err.Error()})
 	}
 	// Create job
 	job := models.Job{

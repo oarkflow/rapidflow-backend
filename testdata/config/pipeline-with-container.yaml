@@ -7,7 +7,7 @@ expose_ports: true
 env:
   GOOS: "linux"
   GOARCH: "amd64"
-  PORT: "3000"
+  PORT: "3001"
   DATABASE_URL: "sqlite://db.sqlite"
 steps:
   - type: "bash"
@@ -17,7 +17,7 @@ steps:
     files:
       config.json: |
         {
-          "port": 3000,
+          "port": 3001,
           "database": "sqlite://db.sqlite"
         }
   - type: "bash"
@@ -38,7 +38,7 @@ steps:
       ./server > /tmp/server.log 2>&1 &
       SERVER_PID=$!
       sleep 3
-      curl http://localhost:3000/health && echo "Health check passed" || echo "Health check failed"
+      curl http://localhost:3001/health && echo "Health check passed" || echo "Health check failed"
       kill $SERVER_PID 2>/dev/null || echo "Server already stopped"
       wait $SERVER_PID 2>/dev/null || echo "Server process cleaned up"
       echo "Server logs:"
@@ -54,7 +54,7 @@ runnables:
     image_name: "my-go-server:latest"
     entrypoint: ["/workspace/server"]
     working_dir: "/workspace"
-    ports: ["8080:3000"] # Docker-style port mapping: host:container
+    ports: ["8081:3001"] # Docker-style port mapping: host:container
     environment:
       ENV: "production"
       DATABASE_URL: "sqlite:///data/prod.db"

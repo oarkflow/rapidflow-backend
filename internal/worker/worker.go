@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
@@ -1396,15 +1397,20 @@ func (w *Worker) StartQueue() {
 			}
 
 			var jobs []models.Job
-			err = w.DB.Select(&jobs, "SELECT id FROM jobs WHERE status = 'pending' LIMIT 1")
+			err = w.DB.Select(&jobs, "SELECT id FROM jobs WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1")
 			if err != nil {
 				log.Printf("Error selecting jobs: %v", err)
+				time.Sleep(2 * time.Second) // Wait before retrying
 				continue
 			}
 			if len(jobs) == 0 {
+				time.Sleep(1 * time.Second) // Wait before checking again
 				continue
 			}
+
 			jobID := jobs[0].ID
+
+			// Run job asynchronously (non-blocking)
 			go func(id int) {
 				err := w.RunJob(id)
 				if err != nil {
