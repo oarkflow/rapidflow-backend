@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/urfave/cli/v2"
@@ -107,8 +108,10 @@ func startServer() error {
 	// Setup API
 	handler := api.NewHandler(db, w)
 	app := fiber.New()
+	app.Use(cors.New())
 	app.Post("/pipelines", handler.CreatePipeline)
 	app.Get("/pipelines", handler.GetPipelines)
+	app.Get("/pipelines/:id", handler.GetPipeline)
 	app.Get("/jobs", handler.GetJobs)
 	app.Post("/pipelines/:pipelineID/jobs", handler.CreateJob)
 	app.Get("/jobs/:id", handler.GetJob)

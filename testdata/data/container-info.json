@@ -1,8 +1,8 @@
 {
-  "artifact_path": "container:dc42f0299fa9df0a4d502f8e893eeff43e360b417af1189e77daab8114a9f331:my-go-server-prod",
-  "container_id": "dc42f0299fa9df0a4d502f8e893eeff43e360b417af1189e77daab8114a9f331",
-  "container_name": "my-go-server-prod",
-  "deployment_id": 10,
+  "artifact_path": "container:dc50f46c6a7f56e4d5ab8568aac968b90242ec078008b51344d0bd3e48688c4c:rapidflow-run-1-production-container",
+  "container_id": "dc50f46c6a7f56e4d5ab8568aac968b90242ec078008b51344d0bd3e48688c4c",
+  "container_name": "rapidflow-run-1-production-container",
+  "deployment_id": 1,
   "runnable_name": "production-container",
   "runnable_type": "docker_container",
   "status": "running",

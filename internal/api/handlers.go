@@ -25,17 +25,26 @@ func NewHandler(db *sqlx.DB, w *worker.Worker) *Handler {
 }
 
 func (h *Handler) CreatePipeline(c *fiber.Ctx) error {
-	var pipeline models.Pipeline
-	if err := c.BodyParser(&pipeline); err != nil {
+	var config models.PipelineConfig
+	if err := c.BodyParser(&config); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
+	// Convert config to YAML
+	configYAML, err := yaml.Marshal(config)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "failed to marshal config"})
+	}
 	query := `INSERT INTO pipelines (name, config) VALUES (?, ?)`
-	result, err := h.DB.Exec(query, pipeline.Name, pipeline.Config)
+	result, err := h.DB.Exec(query, config.Name, string(configYAML))
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
 	id, _ := result.LastInsertId()
-	pipeline.ID = int(id)
+	pipeline := models.Pipeline{
+		ID:     int(id),
+		Name:   config.Name,
+		Config: string(configYAML),
+	}
 	return c.Status(201).JSON(pipeline)
 }
 
@@ -46,6 +55,16 @@ func (h *Handler) GetPipelines(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(pipelines)
+}
+
+func (h *Handler) GetPipeline(c *fiber.Ctx) error {
+	id := c.Params("id")
+	var pipeline models.Pipeline
+	err := h.DB.Get(&pipeline, "SELECT * FROM pipelines WHERE id = ?", id)
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"error": "Pipeline not found"})
+	}
+	return c.JSON(pipeline)
 }
 
 func (h *Handler) GetJobs(c *fiber.Ctx) error {

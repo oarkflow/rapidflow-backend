@@ -5,136 +5,126 @@ import (
 )
 
 type Pipeline struct {
-	ID        int       `db:"id"`
-	Name      string    `db:"name"`
-	Config    string    `db:"config"`
-	CreatedAt time.Time `db:"created_at"`
+	ID        int       `db:"id" json:"id"`
+	Name      string    `db:"name" json:"name"`
+	Config    string    `db:"config" json:"config"`
+	CreatedAt time.Time `db:"created_at" json:"created_at"`
 }
 
 type Job struct {
-	ID          int        `db:"id"`
-	PipelineID  int        `db:"pipeline_id"`
-	Status      string     `db:"status"`
-	Branch      *string    `db:"branch"`
-	RepoName    *string    `db:"repo_name"`
-	RepoURL     *string    `db:"repo_url"`
-	Language    *string    `db:"language"`
-	Version     *string    `db:"version"`
-	Folder      *string    `db:"folder"`
-	ExposePorts *bool      `db:"expose_ports"`
-	Temporary   *bool      `db:"temporary"`
-	TempDir     *string    `db:"temp_dir"` // Path to temporary directory for cleanup
-	Cancelled   bool       `db:"cancelled"`
-	ContainerID *string    `db:"container_id"`
-	CreatedAt   time.Time  `db:"created_at"`
-	StartedAt   *time.Time `db:"started_at"`
-	FinishedAt  *time.Time `db:"finished_at"`
+	ID          int        `db:"id" json:"id"`
+	PipelineID  int        `db:"pipeline_id" json:"pipeline_id"`
+	Status      string     `db:"status" json:"status"`
+	Branch      *string    `db:"branch" json:"branch"`
+	RepoName    *string    `db:"repo_name" json:"repo_name"`
+	RepoURL     *string    `db:"repo_url" json:"repo_url"`
+	Language    *string    `db:"language" json:"language"`
+	Version     *string    `db:"version" json:"version"`
+	Folder      *string    `db:"folder" json:"folder"`
+	ExposePorts *bool      `db:"expose_ports" json:"expose_ports"`
+	Temporary   *bool      `db:"temporary" json:"temporary"`
+	TempDir     *string    `db:"temp_dir" json:"temp_dir"`
+	Cancelled   bool       `db:"cancelled" json:"cancelled"`
+	ContainerID *string    `db:"container_id" json:"container_id"`
+	CreatedAt   time.Time  `db:"created_at" json:"created_at"`
+	StartedAt   *time.Time `db:"started_at" json:"started_at"`
+	FinishedAt  *time.Time `db:"finished_at" json:"finished_at"`
 }
 
 type Step struct {
-	ID        int       `db:"id"`
-	JobID     int       `db:"job_id"`
-	OrderNum  int       `db:"order_num"`
-	Type      string    `db:"type"`
-	Content   string    `db:"content"`
-	Status    string    `db:"status"`
-	Output    *string   `db:"output"`
-	CreatedAt time.Time `db:"created_at"`
+	ID        int       `db:"id" json:"id"`
+	JobID     int       `db:"job_id" json:"job_id"`
+	OrderNum  int       `db:"order_num" json:"order_num"`
+	Type      string    `db:"type" json:"type"`
+	Content   string    `db:"content" json:"content"`
+	Status    string    `db:"status" json:"status"`
+	Output    *string   `db:"output" json:"output"`
+	CreatedAt time.Time `db:"created_at" json:"created_at"`
 }
 
 type Environment struct {
-	ID    int    `db:"id"`
-	JobID int    `db:"job_id"`
-	Key   string `db:"key"`
-	Value string `db:"value"`
+	ID    int    `db:"id" json:"id"`
+	JobID int    `db:"job_id" json:"job_id"`
+	Key   string `db:"key" json:"key"`
+	Value string `db:"value" json:"value"`
 }
 
 type File struct {
-	ID      int    `db:"id"`
-	StepID  int    `db:"step_id"`
-	Name    string `db:"name"`
-	Content string `db:"content"`
+	ID      int    `db:"id" json:"id"`
+	StepID  int    `db:"step_id" json:"step_id"`
+	Name    string `db:"name" json:"name"`
+	Content string `db:"content" json:"content"`
 }
 
 type PipelineConfig struct {
 	Name        string            `yaml:"name"`
-	Language    string            `yaml:"language,omitempty"`  // Optional - will be auto-detected if not provided
-	Version     string            `yaml:"version,omitempty"`   // Optional - will be auto-detected if not provided
-	Branch      string            `yaml:"branch,omitempty"`    // Git branch to use
-	RepoName    string            `yaml:"repo_name,omitempty"` // Repository name
-	RepoURL     string            `yaml:"repo_url,omitempty"`  // Git repository URL for cloning
-	Folder      string            `yaml:"folder,omitempty"`    // Folder within repo or local folder
+	Language    string            `yaml:"language,omitempty"`
+	Version     string            `yaml:"version,omitempty"`
+	Branch      string            `yaml:"branch,omitempty"`
+	RepoName    string            `yaml:"repo_name,omitempty"`
+	RepoURL     string            `yaml:"repo_url,omitempty"`
+	Folder      string            `yaml:"folder,omitempty"`
 	ExposePorts bool              `yaml:"expose_ports,omitempty"`
-	Temporary   bool              `yaml:"temporary,omitempty"` // Clean up everything after execution
+	Temporary   bool              `yaml:"temporary,omitempty"`
 	Env         map[string]string `yaml:"env"`
 	Steps       []StepConfig      `yaml:"steps"`
 	Runnables   []RunnableConfig  `yaml:"runnables,omitempty"`
 }
 
 type StepConfig struct {
-	Type    string            `yaml:"type"`    // bash, file, etc.
-	Content string            `yaml:"content"` // script or content
-	Files   map[string]string `yaml:"files"`   // name: content
+	Type    string            `yaml:"type"`
+	Content string            `yaml:"content"`
+	Files   map[string]string `yaml:"files"`
 }
 
-// RunnableConfig defines how to package/deploy the built application
 type RunnableConfig struct {
-	Type          string                 `yaml:"type"`           // docker_container, docker_image, artifacts, serverless
-	Name          string                 `yaml:"name"`           // runnable name
-	Enabled       bool                   `yaml:"enabled"`        // whether this runnable is active
-	Config        map[string]interface{} `yaml:"config"`         // type-specific configuration
-	Outputs       []OutputConfig         `yaml:"outputs"`        // where to send the runnable
-	Dockerfile    string                 `yaml:"dockerfile"`     // custom dockerfile content
-	Entrypoint    []string               `yaml:"entrypoint"`     // custom entrypoint
-	Ports         []string               `yaml:"ports"`          // Docker-style port mappings: ["3000"], ["3001:3000"], etc.
-	Environment   map[string]string      `yaml:"environment"`    // runtime environment variables
-	ContainerName string                 `yaml:"container_name"` // custom container name
-	ImageName     string                 `yaml:"image_name"`     // custom image name/tag
-	WorkingDir    string                 `yaml:"working_dir"`    // working directory in container
+	Type          string                 `yaml:"type"`
+	Name          string                 `yaml:"name"`
+	Enabled       bool                   `yaml:"enabled"`
+	Config        map[string]interface{} `yaml:"config"`
+	Outputs       []OutputConfig         `yaml:"outputs"`
+	Dockerfile    string                 `yaml:"dockerfile"`
+	Entrypoint    []string               `yaml:"entrypoint"`
+	Ports         []string               `yaml:"ports"`
+	Environment   map[string]string      `yaml:"environment"`
+	ContainerName string                 `yaml:"container_name"`
+	ImageName     string                 `yaml:"image_name"`
+	WorkingDir    string                 `yaml:"working_dir"`
 }
 
-// OutputConfig defines where to send/deploy the runnable
 type OutputConfig struct {
-	Type   string                 `yaml:"type"`   // s3, email, registry, local, webhook
-	Config map[string]interface{} `yaml:"config"` // output-specific configuration
+	Type   string                 `yaml:"type"`
+	Config map[string]interface{} `yaml:"config"`
 }
 
-// Database models for runnables
 type Runnable struct {
-	ID          int       `db:"id"`
-	JobID       int       `db:"job_id"`
-	Name        string    `db:"name"`
-	Type        string    `db:"type"`
-	Config      string    `db:"config"`       // JSON config
-	Status      string    `db:"status"`       // pending, running, success, failed
-	Output      *string   `db:"output"`       // execution output
-	ArtifactURL *string   `db:"artifact_url"` // URL to generated artifact
-	CreatedAt   time.Time `db:"created_at"`
+	ID          int       `db:"id" json:"id"`
+	JobID       int       `db:"job_id" json:"job_id"`
+	Name        string    `db:"name" json:"name"`
+	Type        string    `db:"type" json:"type"`
+	Config      string    `db:"config" json:"config"`
+	Status      string    `db:"status" json:"status"`
+	Output      *string   `db:"output" json:"output"`
+	ArtifactURL *string   `db:"artifact_url" json:"artifact_url"`
+	CreatedAt   time.Time `db:"created_at" json:"created_at"`
 }
 
 type Deployment struct {
-	ID         int       `db:"id"`
-	RunnableID int       `db:"runnable_id"`
-	OutputType string    `db:"output_type"` // s3, email, etc.
-	Config     string    `db:"config"`      // JSON config
-	Status     string    `db:"status"`      // pending, success, failed
-	URL        *string   `db:"url"`         // deployment URL or reference
-	Output     *string   `db:"output"`      // deployment output/logs
-	CreatedAt  time.Time `db:"created_at"`
+	ID         int       `db:"id" json:"id"`
+	RunnableID int       `db:"runnable_id" json:"runnable_id"`
+	OutputType string    `db:"output_type" json:"output_type"`
+	Config     string    `db:"config" json:"config"`
+	Status     string    `db:"status" json:"status"`
+	URL        *string   `db:"url" json:"url"`
+	Output     *string   `db:"output" json:"output"`
+	CreatedAt  time.Time `db:"created_at" json:"created_at"`
 }
 
-// JobWithDetails represents a job with all its related data
 type JobWithDetails struct {
 	Job          Job           `json:"job"`
 	Pipeline     Pipeline      `json:"pipeline"`
 	Steps        []Step        `json:"steps"`
 	Environments []Environment `json:"environments"`
-	Runnables    []Runnable    `json:"runnables,omitempty"`
-	Deployments  []Deployment  `json:"deployments,omitempty"`
-}
-
-// StepWithFiles represents a step with its associated files
-type StepWithFiles struct {
-	Step  Step   `json:"step"`
-	Files []File `json:"files"`
+	Runnables    []Runnable    `json:"runnables"`
+	Deployments  []Deployment  `json:"deployments"`
 }
