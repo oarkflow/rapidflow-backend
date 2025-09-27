@@ -1,0 +1,54 @@
+name: "Local Project Auto-Detection Pipeline"
+# No language/version specified - will be auto-detected
+folder: "./testdata/my-go-app"
+temporary: false
+expose_ports: true
+env:
+  GOOS: "linux"
+  GOARCH: "amd64"
+  PORT: "3000"
+  DATABASE_URL: "sqlite://db.sqlite"
+
+steps:
+  - type: "bash"
+    content: |
+      cd /workspace
+      ls -la
+      echo "=== Auto-detected project contents ==="
+
+  - type: "bash"
+    content: |
+      cd /workspace
+      go mod download
+      go build -o server .
+      chmod +x server
+      echo "Build completed with auto-detected Go version"
+
+  - type: "bash"
+    content: |
+      cd /workspace
+      ./server > /tmp/server.log 2>&1 &
+      SERVER_PID=$!
+      sleep 3
+      curl http://localhost:3000/health && echo "Health check passed" || echo "Health check failed"
+      kill $SERVER_PID 2>/dev/null || echo "Server stopped"
+      wait $SERVER_PID 2>/dev/null || echo "Server process cleaned up"
+      echo "Server logs:"
+      cat /tmp/server.log
+
+runnables:
+  - name: "auto-detected-container"
+    type: "docker_container"
+    enabled: true
+    container_name: "my-go-server-auto"
+    image_name: "my-go-server:auto"
+    entrypoint: ["/workspace/server"]
+    working_dir: "/workspace"
+    ports: ["8081:3000"]
+    environment:
+      ENV: "production"
+      DATABASE_URL: "sqlite:///data/prod.db"
+    outputs:
+      - type: "local"
+        config:
+          path: "./testdata/data/auto-detected-info.json"

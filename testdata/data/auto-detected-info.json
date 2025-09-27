@@ -1,0 +1,10 @@
+{
+  "artifact_path": "container:111b1f64719bbd9c22044ab56b6e29200340b5c7dbb7f55819a71e6358235fa5:my-go-server-auto",
+  "container_id": "111b1f64719bbd9c22044ab56b6e29200340b5c7dbb7f55819a71e6358235fa5",
+  "container_name": "my-go-server-auto",
+  "deployment_id": 2,
+  "runnable_name": "auto-detected-container",
+  "runnable_type": "docker_container",
+  "status": "running",
+  "type": "docker_container"
+}

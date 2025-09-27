@@ -17,10 +17,13 @@ type Job struct {
 	Status      string     `db:"status"`
 	Branch      *string    `db:"branch"`
 	RepoName    *string    `db:"repo_name"`
+	RepoURL     *string    `db:"repo_url"`
 	Language    *string    `db:"language"`
 	Version     *string    `db:"version"`
 	Folder      *string    `db:"folder"`
 	ExposePorts *bool      `db:"expose_ports"`
+	Temporary   *bool      `db:"temporary"`
+	TempDir     *string    `db:"temp_dir"` // Path to temporary directory for cleanup
 	Cancelled   bool       `db:"cancelled"`
 	ContainerID *string    `db:"container_id"`
 	CreatedAt   time.Time  `db:"created_at"`
@@ -55,12 +58,14 @@ type File struct {
 
 type PipelineConfig struct {
 	Name        string            `yaml:"name"`
-	Language    string            `yaml:"language"`
-	Version     string            `yaml:"version,omitempty"`
-	Branch      string            `yaml:"branch,omitempty"`
-	RepoName    string            `yaml:"repo_name,omitempty"`
-	Folder      string            `yaml:"folder,omitempty"`
+	Language    string            `yaml:"language,omitempty"`  // Optional - will be auto-detected if not provided
+	Version     string            `yaml:"version,omitempty"`   // Optional - will be auto-detected if not provided
+	Branch      string            `yaml:"branch,omitempty"`    // Git branch to use
+	RepoName    string            `yaml:"repo_name,omitempty"` // Repository name
+	RepoURL     string            `yaml:"repo_url,omitempty"`  // Git repository URL for cloning
+	Folder      string            `yaml:"folder,omitempty"`    // Folder within repo or local folder
 	ExposePorts bool              `yaml:"expose_ports,omitempty"`
+	Temporary   bool              `yaml:"temporary,omitempty"` // Clean up everything after execution
 	Env         map[string]string `yaml:"env"`
 	Steps       []StepConfig      `yaml:"steps"`
 	Runnables   []RunnableConfig  `yaml:"runnables,omitempty"`

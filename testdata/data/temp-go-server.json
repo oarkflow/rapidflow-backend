@@ -1,0 +1,10 @@
+{
+  "artifact_path": "container:e2d2d0bb5d284279c35f8e1c4cba5d196dca323fd035f79cd6410a06b37a76b9:temp-go-server",
+  "container_id": "e2d2d0bb5d284279c35f8e1c4cba5d196dca323fd035f79cd6410a06b37a76b9",
+  "container_name": "temp-go-server",
+  "deployment_id": 1,
+  "runnable_name": "temporary-go-server",
+  "runnable_type": "docker_container",
+  "status": "running",
+  "type": "docker_container"
+}

@@ -6,8 +6,10 @@ import (
 	"docker-app/internal/models"
 	"docker-app/internal/worker"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/jmoiron/sqlx"
@@ -41,6 +43,28 @@ func main() {
 				},
 				Action: func(c *cli.Context) error {
 					return runPipeline(c.String("file"))
+				},
+			},
+			{
+				Name:  "stop-pipeline",
+				Usage: "Stop a running pipeline and clean up all resources",
+				Flags: []cli.Flag{
+					&cli.IntFlag{
+						Name:     "id",
+						Aliases:  []string{"i"},
+						Usage:    "Pipeline ID to stop",
+						Required: true,
+					},
+				},
+				Action: func(c *cli.Context) error {
+					return stopPipeline(c.Int("id"))
+				},
+			},
+			{
+				Name:  "list-pipelines",
+				Usage: "List all pipelines",
+				Action: func(c *cli.Context) error {
+					return listPipelines()
 				},
 			},
 		},
@@ -117,10 +141,13 @@ CREATE TABLE IF NOT EXISTS jobs (
     status TEXT NOT NULL DEFAULT 'pending',
     branch TEXT,
     repo_name TEXT,
+    repo_url TEXT,
     language TEXT,
     version TEXT,
     folder TEXT,
     expose_ports BOOLEAN DEFAULT 0,
+    temporary BOOLEAN DEFAULT 0,
+    temp_dir TEXT,
     cancelled BOOLEAN DEFAULT 0,
     container_id TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -236,6 +263,9 @@ func runPipeline(filePath string) error {
 	if config.RepoName != "" {
 		job.RepoName = &config.RepoName
 	}
+	if config.RepoURL != "" {
+		job.RepoURL = &config.RepoURL
+	}
 	if config.Language != "" {
 		job.Language = &config.Language
 	}
@@ -248,8 +278,11 @@ func runPipeline(filePath string) error {
 	if config.ExposePorts {
 		job.ExposePorts = &config.ExposePorts
 	}
-	query = `INSERT INTO jobs (pipeline_id, status, branch, repo_name, language, version, folder, expose_ports) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-	result, err = db.Exec(query, job.PipelineID, job.Status, job.Branch, job.RepoName, job.Language, job.Version, job.Folder, job.ExposePorts)
+	if config.Temporary {
+		job.Temporary = &config.Temporary
+	}
+	query = `INSERT INTO jobs (pipeline_id, status, branch, repo_name, repo_url, language, version, folder, expose_ports, temporary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	result, err = db.Exec(query, job.PipelineID, job.Status, job.Branch, job.RepoName, job.RepoURL, job.Language, job.Version, job.Folder, job.ExposePorts, job.Temporary)
 	if err != nil {
 		return err
 	}
@@ -325,6 +358,136 @@ func runPipeline(filePath string) error {
 		log.Printf("Error running job %d: %v", jobID, err)
 		db.Exec("UPDATE jobs SET status = 'failed' WHERE id = ?", jobID)
 		return err
+	}
+
+	return nil
+}
+
+func stopPipeline(pipelineID int) error {
+	// Connect DB
+	db, err := sqlx.Connect("sqlite3", "./testdata/data/ci.db")
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Get all jobs for this pipeline
+	var jobs []models.Job
+	err = db.Select(&jobs, "SELECT * FROM jobs WHERE pipeline_id = ?", pipelineID)
+	if err != nil {
+		return err
+	}
+
+	if len(jobs) == 0 {
+		log.Printf("No jobs found for pipeline %d", pipelineID)
+		return nil
+	}
+
+	// Create worker to handle cleanup
+	w, err := worker.NewWorker(db)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("Stopping pipeline %d with %d jobs", pipelineID, len(jobs))
+
+	// Stop and clean up each job
+	for _, job := range jobs {
+		log.Printf("Stopping job %d", job.ID)
+
+		// Cancel any running job
+		w.CancelJob(job.ID)
+
+		// Get temp directory from database
+		var tempDir string
+		if job.TempDir != nil {
+			tempDir = *job.TempDir
+		}
+
+		var containerID string
+		if job.ContainerID != nil {
+			containerID = *job.ContainerID
+		}
+
+		// Get all runnable containers for this job
+		var runnables []models.Runnable
+		err = db.Select(&runnables, "SELECT * FROM runnables WHERE job_id = ?", job.ID)
+		if err == nil {
+			for _, runnable := range runnables {
+				var runnableConfig models.RunnableConfig
+				if err := json.Unmarshal([]byte(runnable.Config), &runnableConfig); err == nil {
+					if runnableConfig.ContainerName != "" {
+						log.Printf("Removing runnable container: %s", runnableConfig.ContainerName)
+						w.RemoveContainerByName(runnableConfig.ContainerName)
+					}
+				}
+			}
+		}
+
+		// Clean up main job container and temp directory
+		w.CleanupJobResources(job.ID, containerID, tempDir)
+
+		// Update job status
+		db.Exec("UPDATE jobs SET status = 'stopped', finished_at = CURRENT_TIMESTAMP WHERE id = ?", job.ID)
+	}
+
+	log.Printf("Pipeline %d stopped and cleaned up successfully", pipelineID)
+	return nil
+}
+
+func listPipelines() error {
+	// Connect DB
+	db, err := sqlx.Connect("sqlite3", "./testdata/data/ci.db")
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Get all pipelines with their latest job info
+	query := `
+		SELECT p.id, p.name, p.created_at,
+		       COUNT(j.id) as job_count,
+		       MAX(j.created_at) as last_job_time,
+		       GROUP_CONCAT(DISTINCT j.status) as job_statuses
+		FROM pipelines p
+		LEFT JOIN jobs j ON p.id = j.pipeline_id
+		GROUP BY p.id, p.name, p.created_at
+		ORDER BY p.created_at DESC
+	`
+
+	rows, err := db.Query(query)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	fmt.Printf("%-4s %-40s %-8s %-20s %s\n", "ID", "Name", "Jobs", "Last Run", "Status")
+	fmt.Println(strings.Repeat("-", 80))
+
+	for rows.Next() {
+		var id int
+		var name string
+		var createdAt string
+		var jobCount int
+		var lastJobTime *string
+		var jobStatuses *string
+
+		err := rows.Scan(&id, &name, &createdAt, &jobCount, &lastJobTime, &jobStatuses)
+		if err != nil {
+			continue
+		}
+
+		lastRun := "Never"
+		if lastJobTime != nil {
+			lastRun = *lastJobTime
+		}
+
+		status := "No jobs"
+		if jobStatuses != nil {
+			status = *jobStatuses
+		}
+
+		fmt.Printf("%-4d %-40s %-8d %-20s %s\n", id, name, jobCount, lastRun, status)
 	}
 
 	return nil

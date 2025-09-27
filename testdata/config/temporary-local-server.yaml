@@ -1,0 +1,53 @@
+name: "Temporary Local Go Server"
+folder: "./testdata/my-go-app" # Use our working local project
+temporary: true # Will be cleaned up when stopped manually
+expose_ports: true
+env:
+  GOOS: "linux"
+  GOARCH: "amd64"
+  PORT: "3000"
+  DATABASE_URL: "sqlite://db.sqlite"
+
+steps:
+  - type: "bash"
+    content: |
+      cd /workspace
+      echo "=== Building Local Go Server ==="
+      ls -la
+
+  - type: "bash"
+    content: |
+      cd /workspace
+      go mod download
+      go build -o temp-server .
+      chmod +x temp-server
+      echo "Build completed"
+
+  - type: "bash"
+    content: |
+      cd /workspace
+      echo "Testing server locally..."
+      ./temp-server > /tmp/server.log 2>&1 &
+      SERVER_PID=$!
+      sleep 3
+      curl http://localhost:3000/health && echo " - Server test passed"
+      kill $SERVER_PID 2>/dev/null
+      wait $SERVER_PID 2>/dev/null || echo "Server stopped"
+
+# Container that users can access until manually stopped
+runnables:
+  - name: "temporary-go-server"
+    type: "docker_container"
+    enabled: true
+    container_name: "temp-go-server"
+    image_name: "temp-go:latest"
+    entrypoint: ["/workspace/temp-server"]
+    working_dir: "/workspace"
+    ports: ["8095:3000"] # Available on host port 8095
+    environment:
+      ENV: "development"
+      DATABASE_URL: "sqlite:///tmp/temp.db"
+    outputs:
+      - type: "local"
+        config:
+          path: "./testdata/data/temp-go-server.json"

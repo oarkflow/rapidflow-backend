@@ -1,0 +1,33 @@
+name: "Simple Temporary GitHub Go Project"
+repo_url: "https://github.com/gorilla/mux.git"
+branch: "main"
+temporary: true # This will clean up everything after execution
+expose_ports: false # No port exposure needed for temporary test
+env:
+  GOOS: "linux"
+  GOARCH: "amd64"
+
+steps:
+  - type: "bash"
+    content: |
+      cd /workspace
+      echo "=== Auto-detected project structure ==="
+      find . -maxdepth 2 -name "*.go" | head -5
+      ls -la
+
+  - type: "bash"
+    content: |
+      cd /workspace
+      echo "=== Testing go mod and build ==="
+      go mod tidy
+      go build -v ./...
+      echo "Build completed successfully!"
+
+  - type: "bash"
+    content: |
+      cd /workspace
+      echo "=== Running tests ==="
+      go test -v ./... || echo "Tests completed"
+
+# No runnables for temporary test - just build and test
+runnables: []

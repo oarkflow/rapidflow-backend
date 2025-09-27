@@ -1,0 +1,60 @@
+name: "GitHub Repository Auto-Detection Pipeline"
+repo_url: "https://github.com/gin-gonic/examples.git"
+branch: "master"
+temporary: false # Keep resources for inspection
+expose_ports: true
+env:
+  GOOS: "linux"
+  GOARCH: "amd64"
+  PORT: "8083"
+
+steps:
+  - type: "bash"
+    content: |
+      cd /workspace
+      ls -la
+      echo "=== Project Contents ==="
+      find . -name "*.go" | head -10
+
+  - type: "bash"
+    content: |
+      cd /workspace/basic
+      ls -la
+      echo "=== Basic example contents ==="
+
+  - type: "bash"
+    content: |
+      cd /workspace/basic
+      go mod download
+      go build -o gin-basic .
+      ls -la gin-basic
+      echo "Build completed"
+
+  - type: "bash"
+    content: |
+      cd /workspace/basic
+      echo "Starting gin basic server..."
+      ./gin-basic > /tmp/server.log 2>&1 &
+      SERVER_PID=$!
+      sleep 3
+      curl http://localhost:8083/ping && echo "Health check passed" || echo "Health check failed"
+      kill $SERVER_PID 2>/dev/null || echo "Server stopped"
+      wait $SERVER_PID 2>/dev/null || echo "Server process cleaned up"
+      echo "Server logs:"
+      cat /tmp/server.log# Test container deployment
+runnables:
+  - name: "gin-example-container"
+    type: "docker_container"
+    enabled: true
+    container_name: "gin-example-auto"
+    image_name: "gin-example:auto"
+    entrypoint: ["/workspace/basic/gin-basic"]
+    working_dir: "/workspace/basic"
+    ports: ["8083:8083"]
+    environment:
+      ENV: "development"
+      GIN_MODE: "debug"
+    outputs:
+      - type: "local"
+        config:
+          path: "./testdata/data/gin-example-info.json"

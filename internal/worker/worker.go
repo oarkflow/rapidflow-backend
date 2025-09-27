@@ -11,7 +11,9 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -98,6 +100,270 @@ func getBaseImage(language, version string) string {
 	}
 }
 
+// LanguageInfo holds detected language and version information
+type LanguageInfo struct {
+	Language string
+	Version  string
+}
+
+// detectLanguageAndVersion automatically detects language and version from the project folder
+func detectLanguageAndVersion(projectPath string) (*LanguageInfo, error) {
+	log.Printf("Detecting language and version in: %s", projectPath)
+
+	// Check for Go
+	if goInfo := detectGo(projectPath); goInfo != nil {
+		return goInfo, nil
+	}
+
+	// Check for Node.js
+	if nodeInfo := detectNode(projectPath); nodeInfo != nil {
+		return nodeInfo, nil
+	}
+
+	// Check for Python
+	if pythonInfo := detectPython(projectPath); pythonInfo != nil {
+		return pythonInfo, nil
+	}
+
+	// Check for Java/Scala
+	if javaInfo := detectJavaScala(projectPath); javaInfo != nil {
+		return javaInfo, nil
+	}
+
+	// Default to Go if nothing detected
+	log.Printf("No specific language detected, defaulting to golang")
+	return &LanguageInfo{Language: "golang", Version: "latest"}, nil
+}
+
+// detectGo detects Go projects and version
+func detectGo(projectPath string) *LanguageInfo {
+	goModPath := filepath.Join(projectPath, "go.mod")
+	if _, err := os.Stat(goModPath); err == nil {
+		log.Printf("Detected Go project (go.mod found)")
+
+		// Try to extract Go version from go.mod
+		content, err := os.ReadFile(goModPath)
+		if err != nil {
+			return &LanguageInfo{Language: "golang", Version: "latest"}
+		}
+
+		// Look for "go 1.21" pattern
+		goVersionRegex := regexp.MustCompile(`go\s+(\d+\.\d+(?:\.\d+)?)`)
+		matches := goVersionRegex.FindStringSubmatch(string(content))
+		if len(matches) > 1 {
+			return &LanguageInfo{Language: "golang", Version: matches[1]}
+		}
+
+		return &LanguageInfo{Language: "golang", Version: "latest"}
+	}
+
+	// Check for .go files
+	matches, _ := filepath.Glob(filepath.Join(projectPath, "*.go"))
+	if len(matches) > 0 {
+		log.Printf("Detected Go project (.go files found)")
+		return &LanguageInfo{Language: "golang", Version: "latest"}
+	}
+
+	return nil
+}
+
+// detectNode detects Node.js projects and version
+func detectNode(projectPath string) *LanguageInfo {
+	packageJsonPath := filepath.Join(projectPath, "package.json")
+	if _, err := os.Stat(packageJsonPath); err == nil {
+		log.Printf("Detected Node.js project (package.json found)")
+
+		// Try to extract Node version from package.json
+		content, err := os.ReadFile(packageJsonPath)
+		if err != nil {
+			return &LanguageInfo{Language: "node", Version: "latest"}
+		}
+
+		var packageData map[string]interface{}
+		if err := json.Unmarshal(content, &packageData); err == nil {
+			if engines, ok := packageData["engines"].(map[string]interface{}); ok {
+				if nodeVersion, ok := engines["node"].(string); ok {
+					// Clean up version string (remove ^ ~ >= etc)
+					cleanVersion := regexp.MustCompile(`[^\d\.]`).ReplaceAllString(nodeVersion, "")
+					if cleanVersion != "" {
+						return &LanguageInfo{Language: "node", Version: cleanVersion}
+					}
+				}
+			}
+		}
+
+		return &LanguageInfo{Language: "node", Version: "latest"}
+	}
+
+	// Check for .js files
+	matches, _ := filepath.Glob(filepath.Join(projectPath, "*.js"))
+	if len(matches) > 0 {
+		log.Printf("Detected Node.js project (.js files found)")
+		return &LanguageInfo{Language: "node", Version: "latest"}
+	}
+
+	return nil
+}
+
+// detectPython detects Python projects and version
+func detectPython(projectPath string) *LanguageInfo {
+	// Check for requirements.txt
+	reqPath := filepath.Join(projectPath, "requirements.txt")
+	if _, err := os.Stat(reqPath); err == nil {
+		log.Printf("Detected Python project (requirements.txt found)")
+		return &LanguageInfo{Language: "python", Version: "latest"}
+	}
+
+	// Check for setup.py
+	setupPath := filepath.Join(projectPath, "setup.py")
+	if _, err := os.Stat(setupPath); err == nil {
+		log.Printf("Detected Python project (setup.py found)")
+		return &LanguageInfo{Language: "python", Version: "latest"}
+	}
+
+	// Check for pyproject.toml
+	pyprojectPath := filepath.Join(projectPath, "pyproject.toml")
+	if _, err := os.Stat(pyprojectPath); err == nil {
+		log.Printf("Detected Python project (pyproject.toml found)")
+		return &LanguageInfo{Language: "python", Version: "latest"}
+	}
+
+	// Check for .py files
+	matches, _ := filepath.Glob(filepath.Join(projectPath, "*.py"))
+	if len(matches) > 0 {
+		log.Printf("Detected Python project (.py files found)")
+		return &LanguageInfo{Language: "python", Version: "latest"}
+	}
+
+	return nil
+}
+
+// detectJavaScala detects Java/Scala projects and version
+func detectJavaScala(projectPath string) *LanguageInfo {
+	// Check for build.sbt (Scala)
+	sbtPath := filepath.Join(projectPath, "build.sbt")
+	if _, err := os.Stat(sbtPath); err == nil {
+		log.Printf("Detected Scala project (build.sbt found)")
+		return &LanguageInfo{Language: "scala", Version: "latest"}
+	}
+
+	// Check for pom.xml (Maven - Java)
+	pomPath := filepath.Join(projectPath, "pom.xml")
+	if _, err := os.Stat(pomPath); err == nil {
+		log.Printf("Detected Java project (pom.xml found)")
+		return &LanguageInfo{Language: "java", Version: "latest"}
+	}
+
+	// Check for build.gradle (Gradle - Java)
+	gradlePath := filepath.Join(projectPath, "build.gradle")
+	if _, err := os.Stat(gradlePath); err == nil {
+		log.Printf("Detected Java project (build.gradle found)")
+		return &LanguageInfo{Language: "java", Version: "latest"}
+	}
+
+	return nil
+}
+
+// cloneRepository clones a git repository to a temporary directory
+func cloneRepository(repoURL, branch, targetDir string) error {
+	log.Printf("Cloning repository %s (branch: %s) to %s", repoURL, branch, targetDir)
+
+	var cmd *exec.Cmd
+	if branch != "" {
+		cmd = exec.Command("git", "clone", "--branch", branch, "--depth", "1", repoURL, targetDir)
+	} else {
+		cmd = exec.Command("git", "clone", "--depth", "1", repoURL, targetDir)
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to clone repository: %s, output: %s", err, string(output))
+	}
+
+	log.Printf("Repository cloned successfully")
+	return nil
+}
+
+// cleanupTemporaryResources cleans up temporary containers, images, and directories
+func (w *Worker) cleanupTemporaryResources(jobID int, containerID, tempDir string) {
+	log.Printf("Cleaning up temporary resources for job %d", jobID)
+
+	ctx := context.Background()
+
+	// Remove container if it exists
+	if containerID != "" {
+		log.Printf("Removing temporary container: %s", containerID)
+		err := w.Docker.ContainerRemove(ctx, containerID, types.ContainerRemoveOptions{Force: true})
+		if err != nil {
+			log.Printf("Failed to remove container %s: %v", containerID, err)
+		}
+	}
+
+	// Remove temporary directory
+	if tempDir != "" {
+		log.Printf("Removing temporary directory: %s", tempDir)
+		err := os.RemoveAll(tempDir)
+		if err != nil {
+			log.Printf("Failed to remove temporary directory %s: %v", tempDir, err)
+		}
+	}
+
+	log.Printf("Cleanup completed for job %d", jobID)
+}
+
+// RemoveContainerByName removes a container by its name
+func (w *Worker) RemoveContainerByName(containerName string) error {
+	ctx := context.Background()
+
+	// Find container by name
+	containers, err := w.Docker.ContainerList(ctx, types.ContainerListOptions{All: true})
+	if err != nil {
+		return fmt.Errorf("failed to list containers: %v", err)
+	}
+
+	for _, container := range containers {
+		for _, name := range container.Names {
+			// Docker prefixes container names with "/"
+			if strings.TrimPrefix(name, "/") == containerName {
+				log.Printf("Removing container: %s (ID: %s)", containerName, container.ID)
+				err := w.Docker.ContainerRemove(ctx, container.ID, types.ContainerRemoveOptions{Force: true})
+				if err != nil {
+					return fmt.Errorf("failed to remove container %s: %v", containerName, err)
+				}
+				return nil
+			}
+		}
+	}
+
+	log.Printf("Container %s not found", containerName)
+	return nil
+}
+
+// CleanupJobResources cleans up all resources associated with a job
+func (w *Worker) CleanupJobResources(jobID int, containerID, tempDir string) {
+	log.Printf("Cleaning up job %d resources", jobID)
+
+	ctx := context.Background()
+
+	// Remove main container if it exists
+	if containerID != "" {
+		log.Printf("Removing job container: %s", containerID)
+		err := w.Docker.ContainerRemove(ctx, containerID, types.ContainerRemoveOptions{Force: true})
+		if err != nil {
+			log.Printf("Failed to remove job container %s: %v", containerID, err)
+		}
+	}
+
+	// Remove temporary directory
+	if tempDir != "" {
+		log.Printf("Removing temporary directory: %s", tempDir)
+		err := os.RemoveAll(tempDir)
+		if err != nil {
+			log.Printf("Failed to remove temporary directory %s: %v", tempDir, err)
+		}
+	}
+}
+
 func (w *Worker) RunJob(jobID int) error {
 	return w.RunJobWithContext(context.Background(), jobID)
 }
@@ -129,6 +395,90 @@ func (w *Worker) RunJobWithContext(ctx context.Context, jobID int) error {
 	_, err = w.DB.Exec("UPDATE jobs SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ?", jobID)
 	if err != nil {
 		return err
+	}
+
+	// Handle repository cloning and language detection
+	var projectPath string
+	var tempDir string
+	var isTemporary bool
+
+	if job.Temporary != nil && *job.Temporary {
+		isTemporary = true
+	}
+
+	// If repo URL is provided, clone the repository
+	if job.RepoURL != nil && *job.RepoURL != "" {
+		// Create temporary directory for cloning
+		tempDir = filepath.Join(os.TempDir(), fmt.Sprintf("rapidflow-repo-%d", jobID))
+		err = os.MkdirAll(tempDir, 0755)
+		if err != nil {
+			return fmt.Errorf("failed to create temp directory: %v", err)
+		}
+
+		// Store temp directory path in database for cleanup
+		if isTemporary {
+			_, err = w.DB.Exec("UPDATE jobs SET temp_dir = ? WHERE id = ?", tempDir, jobID)
+			if err != nil {
+				log.Printf("Warning: failed to store temp directory path: %v", err)
+			}
+		}
+
+		branch := "main" // default branch
+		if job.Branch != nil && *job.Branch != "" {
+			branch = *job.Branch
+		}
+
+		// Clone repository
+		err = cloneRepository(*job.RepoURL, branch, tempDir)
+		if err != nil {
+			return fmt.Errorf("failed to clone repository: %v", err)
+		}
+
+		// If folder is specified, use it as subdirectory
+		if job.Folder != nil && *job.Folder != "" {
+			projectPath = filepath.Join(tempDir, *job.Folder)
+		} else {
+			projectPath = tempDir
+		}
+	} else if job.Folder != nil && *job.Folder != "" {
+		// Use local folder
+		projectPath = *job.Folder
+	} else {
+		return fmt.Errorf("either repo_url or folder must be specified")
+	}
+
+	// Auto-detect language and version if not specified
+	var detectedLanguage, detectedVersion string
+	if job.Language == nil || *job.Language == "" || job.Version == nil || *job.Version == "" {
+		log.Printf("Auto-detecting language and version for job %d", jobID)
+		langInfo, err := detectLanguageAndVersion(projectPath)
+		if err != nil {
+			log.Printf("Language detection failed, using defaults: %v", err)
+			detectedLanguage = "golang"
+			detectedVersion = "latest"
+		} else {
+			detectedLanguage = langInfo.Language
+			detectedVersion = langInfo.Version
+		}
+
+		// Update job with detected values if they weren't provided
+		if job.Language == nil || *job.Language == "" {
+			_, err = w.DB.Exec("UPDATE jobs SET language = ? WHERE id = ?", detectedLanguage, jobID)
+			if err != nil {
+				return err
+			}
+			job.Language = &detectedLanguage
+		}
+
+		if job.Version == nil || *job.Version == "" {
+			_, err = w.DB.Exec("UPDATE jobs SET version = ? WHERE id = ?", detectedVersion, jobID)
+			if err != nil {
+				return err
+			}
+			job.Version = &detectedVersion
+		}
+
+		log.Printf("Job %d: Language=%s, Version=%s", jobID, *job.Language, *job.Version)
 	}
 	// Get env
 	var envs []models.Environment
@@ -208,13 +558,16 @@ func (w *Worker) RunJobWithContext(ctx context.Context, jobID int) error {
 	hostConfig := &container.HostConfig{
 		PortBindings: portBindings,
 	}
-	if job.Folder != nil {
-		absPath, err := filepath.Abs(*job.Folder)
+
+	// Use the determined project path for volume binding
+	if projectPath != "" {
+		absPath, err := filepath.Abs(projectPath)
 		if err != nil {
 			return err
 		}
 		hostConfig.Binds = []string{fmt.Sprintf("%s:/workspace", absPath)}
 	}
+
 	resp, err := w.Docker.ContainerCreate(jobCtx, &container.Config{
 		Image:        baseImage,
 		Env:          envVars,
@@ -230,10 +583,17 @@ func (w *Worker) RunJobWithContext(ctx context.Context, jobID int) error {
 	// Store container ID in database for potential cleanup
 	_, err = w.DB.Exec("UPDATE jobs SET container_id = ? WHERE id = ?", containerID, jobID)
 	if err != nil {
-		log.Printf("Warning: failed to store container ID: %v", err)
+		return err
 	}
 
-	defer w.Docker.ContainerRemove(context.Background(), containerID, types.ContainerRemoveOptions{Force: true})
+	// Note: For temporary jobs, cleanup will be handled by stop-pipeline command
+	// This allows users to access the server before manually stopping it
+	if isTemporary {
+		log.Printf("Job %d marked as temporary - resources will remain until pipeline is stopped", jobID)
+	} else {
+		// Only auto-cleanup non-temporary jobs
+		defer w.Docker.ContainerRemove(context.Background(), containerID, types.ContainerRemoveOptions{Force: true})
+	}
 
 	// Start container
 	err = w.Docker.ContainerStart(jobCtx, containerID, types.ContainerStartOptions{})
@@ -663,6 +1023,40 @@ func (w *Worker) handleDockerContainer(ctx context.Context, runnable models.Runn
 
 		// Make the entrypoint executable
 		entrypointPath := actualEntrypoint[0]
+
+		// First check if the entrypoint file exists
+		log.Printf("Checking if entrypoint exists: %s", entrypointPath)
+		checkResp, err := w.Docker.ContainerExecCreate(ctx, sourceContainerID, types.ExecConfig{
+			Cmd:          []string{"sh", "-c", fmt.Sprintf("ls -la %s", entrypointPath)},
+			AttachStdout: true,
+			AttachStderr: true,
+		})
+		if err != nil {
+			return "", fmt.Errorf("failed to create exec for entrypoint check: %v", err)
+		}
+
+		checkHijacked, err := w.Docker.ContainerExecAttach(ctx, checkResp.ID, types.ExecStartCheck{})
+		if err != nil {
+			return "", fmt.Errorf("failed to attach to entrypoint check exec: %v", err)
+		}
+
+		var checkOutput bytes.Buffer
+		checkScanner := bufio.NewScanner(checkHijacked.Reader)
+		for checkScanner.Scan() {
+			line := checkScanner.Text()
+			log.Printf("entrypoint check output: %s", line)
+			checkOutput.WriteString(line + "\n")
+		}
+		checkHijacked.Close()
+
+		checkInspect, err := w.Docker.ContainerExecInspect(ctx, checkResp.ID)
+		if err != nil {
+			return "", fmt.Errorf("failed to inspect entrypoint check exec: %v", err)
+		}
+		if checkInspect.ExitCode != 0 {
+			return "", fmt.Errorf("entrypoint file %s does not exist (exit code %d): %s", entrypointPath, checkInspect.ExitCode, checkOutput.String())
+		}
+
 		log.Printf("Ensuring entrypoint is executable: %s", entrypointPath)
 		execResp, err = w.Docker.ContainerExecCreate(ctx, sourceContainerID, types.ExecConfig{
 			Cmd:          []string{"sh", "-c", fmt.Sprintf("chmod +x %s && ls -la %s", entrypointPath, entrypointPath)},

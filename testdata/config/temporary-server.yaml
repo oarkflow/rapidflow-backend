@@ -1,0 +1,54 @@
+name: "Temporary Server Test - Keep Running"
+repo_url: "https://github.com/gin-gonic/examples.git"
+branch: "master"
+folder: "basic" # Use the basic example subfolder
+temporary: true # Will be cleaned up when stopped manually
+expose_ports: true
+env:
+  GOOS: "linux"
+  GOARCH: "amd64"
+  PORT: "8080"
+
+steps:
+  - type: "bash"
+    content: |
+      cd /workspace
+      echo "=== Building Gin Basic Example ==="
+      ls -la
+
+  - type: "bash"
+    content: |
+      cd /workspace
+      go mod download
+      go build -o gin-server .
+      chmod +x gin-server
+      echo "Build completed"
+
+  - type: "bash"
+    content: |
+      cd /workspace
+      echo "Testing server locally..."
+      ./gin-server > /tmp/server.log 2>&1 &
+      SERVER_PID=$!
+      sleep 3
+      curl http://localhost:8080/ping && echo " - Server test passed"
+      kill $SERVER_PID 2>/dev/null
+      wait $SERVER_PID 2>/dev/null || echo "Server stopped"
+
+# Container that users can access
+runnables:
+  - name: "temporary-gin-server"
+    type: "docker_container"
+    enabled: true
+    container_name: "gin-temp-server"
+    image_name: "gin-temp:latest"
+    entrypoint: ["/workspace/gin-server"]
+    working_dir: "/workspace"
+    ports: ["8090:8080"] # Available on host port 8090
+    environment:
+      ENV: "development"
+      GIN_MODE: "debug"
+    outputs:
+      - type: "local"
+        config:
+          path: "./testdata/data/temp-gin-server.json"

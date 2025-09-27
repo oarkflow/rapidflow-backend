@@ -1,0 +1,31 @@
+name: "Temporary Node.js Test Pipeline"
+repo_url: "https://github.com/expressjs/express.git"
+branch: "master"
+temporary: true # Clean up everything after execution
+expose_ports: true
+env:
+  NODE_ENV: "development"
+  PORT: "3000"
+
+steps:
+  - type: "bash"
+    content: |
+      cd /workspace
+      ls -la
+      echo "=== Express.js Project Structure ==="
+      find . -name "package.json" | head -5
+
+  - type: "bash"
+    content: |
+      cd /workspace
+      npm install --production
+      echo "Dependencies installed"
+
+  - type: "bash"
+    content: |
+      cd /workspace
+      echo "Running Express.js tests..."
+      npm test || echo "Tests completed (some may have failed)"
+
+# No runnables - this is just a temporary test
+runnables: []

@@ -1,0 +1,86 @@
+name: "GitHub Temporary Server Demo"
+repo_url: "https://github.com/gorilla/mux.git"
+branch: "main"
+temporary: true # Will stay running until manually stopped
+expose_ports: true
+env:
+  GOOS: "linux"
+  GOARCH: "amd64"
+  PORT: "8098"
+
+steps:
+  - type: "bash"
+    content: |
+      cd /workspace
+      echo "=== Auto-detected Mux Project ==="
+      ls -la
+      find . -name "*.go" | head -3
+
+  - type: "bash"
+    content: |
+      cd /workspace
+      mkdir -p server
+      cd server
+      go mod init github.com/example/mux-server
+      go mod edit -require=github.com/gorilla/mux@v1.8.0
+      go mod download
+      go mod tidy
+      go get github.com/gorilla/mux
+      echo "=== Building simple server ==="
+      cat > main.go << 'EOF'
+      package main
+      import (
+          "fmt"
+          "net/http"
+          "os"
+          "github.com/gorilla/mux"
+      )
+      func main() {
+          port := os.Getenv("PORT")
+          if port == "" {
+              port = "8097"
+          }
+          r := mux.NewRouter()
+          r.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+              fmt.Fprintf(w, "Hello from Gorilla Mux! This is a temporary server.")
+          })
+          r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+              fmt.Fprintf(w, `{"status":"ok","server":"mux"}`)
+          })
+          fmt.Printf("Server starting on :%s\n", port)
+          http.ListenAndServe(":"+port, r)
+      }
+      EOF
+      go build -o mux-server main.go
+      chmod +x mux-server
+      cp mux-server ..
+      cd ..
+      echo "Build completed"
+
+  - type: "bash"
+    content: |
+      cd /workspace
+      echo "Testing server..."
+      ./mux-server > /tmp/server.log 2>&1 &
+      SERVER_PID=$!
+      sleep 3
+      curl http://localhost:8097/health && echo " - Server works!"
+      kill $SERVER_PID 2>/dev/null
+      wait $SERVER_PID 2>/dev/null || echo "Test completed"
+
+# Keep this running for user access
+runnables:
+  - name: "github-mux-server"
+    type: "docker_container"
+    enabled: true
+    container_name: "github-mux-temp"
+    image_name: "github-mux:temp"
+    entrypoint: ["/workspace/mux-server"]
+    working_dir: "/workspace"
+    ports: ["8099:8097"] # Users can access via http://localhost:8099
+    environment:
+      ENV: "development"
+    outputs:
+      - type: "local"
+        config:
+          path: "./testdata/data/github-mux-temp.json"
