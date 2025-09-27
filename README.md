@@ -435,20 +435,55 @@ See `testdata/config/s3-deployment.yaml` for a complete example.
 - Configure bucket policies for access control
 - Use private ACLs by default
 
-## Features
+## Extensible Provider System
 
-- Define pipelines in YAML with multi-step builds
-- Execute steps in Docker containers for isolation
-- Support for bash scripts, file creation, environment variables
-- Job queue with background processing
-- HTTP API for pipeline and job management
-- Git repository cloning and branch checkout
-- Port exposure for services
-- **VPS Deployment**: Deploy to remote servers via SSH
-- **Nginx Configuration**: Automatic web server setup
-- **Email Notifications**: Send build artifacts via SMTP
-- **S3 Storage**: Upload artifacts to cloud storage
-- **SSH Port Support**: Custom SSH ports for all providers
+The deployment system is built on a clean provider interface that allows for easy extension with custom deployment providers.
+
+### Provider Interface
+
+All deployment providers implement the `Provider` interface:
+
+```go
+type Provider interface {
+    Deploy(ctx context.Context, runnable models.Runnable, deployment models.Deployment, artifactPath string) error
+    GetType() string
+}
+```
+
+### Built-in Providers
+
+- **S3Provider**: Upload artifacts to AWS S3
+- **EmailProvider**: Send emails via SMTP, SES, or HTTP APIs
+- **WebhookProvider**: Send HTTP webhooks
+- **LocalProvider**: Local file system deployment
+- **VPSProvider**: Deploy to VPS with Nginx Proxy Manager
+- **NginxProvider**: Deploy to VPS with native Nginx
+
+### Creating Custom Providers
+
+To create a custom provider:
+
+```go
+// Implement the Provider interface
+type MyCustomProvider struct{}
+
+func (p *MyCustomProvider) GetType() string {
+    return "my-custom"
+}
+
+func (p *MyCustomProvider) Deploy(ctx context.Context, runnable models.Runnable, deployment models.Deployment, artifactPath string) error {
+    // Your custom deployment logic here
+    return nil
+}
+
+// Register the provider
+pm := NewProviderManager()
+pm.RegisterProvider(&MyCustomProvider{})
+```
+
+### Provider Configuration
+
+Each provider accepts its own configuration format via the `deployment.config` JSON field. The configuration is specific to each provider type.
 
 9. **Reliability**
    - Job retry mechanisms
